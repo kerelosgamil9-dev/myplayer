@@ -16,7 +16,7 @@ import core
 import textfix
 from widgets import (ACCENT, BG, DANGER, DIVIDER, SUB, SURFACE, SURFACE2, TEXT, ChipsRow, Dialog,
                      FieldInput, Icon, IconButton, MenuSheet, PromptDialog, Row, SheetLabel,
-                     SheetRow, SheetTitle, Switch, Tap, Thumb, Toast, Txt, VList)
+                     SheetRow, SheetTitle, PillSwitch, Tap, Thumb, Toast, Txt, VList)
 
 
 # ---------------------------------------------------------------------------
@@ -601,7 +601,7 @@ class SwitchRow(Widget):
         kw.setdefault('height', dp(56))
         super(SwitchRow, self).__init__(**kw)
         self.lbl = Txt(ltext=label, font_size=sp(16), size_hint=(None, None))
-        self.sw = Switch(value=value, on_change=on_change)
+        self.sw = PillSwitch(value=value, on_change=on_change)
         self.add_widget(self.lbl)
         self.add_widget(self.sw)
         self.bind(pos=self._lay, size=self._lay)

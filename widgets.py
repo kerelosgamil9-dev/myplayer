@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 widgets.py - all custom widgets (pure Python, no .kv files):
-  Txt, Icon, Tap, IconButton, Thumb, Switch, SeekBar, FieldInput,
+  Txt, Icon, Tap, IconButton, Thumb, PillSwitch, SeekBar, FieldInput,
   VList (virtualised list with scrolling, long-press selection and drag reordering),
   Overlay / MenuSheet / Dialog / PromptDialog, Toast.
 """
@@ -378,13 +378,13 @@ class IconButton(Tap):
         return Tap.on_touch_down(self, touch)
 
 
-class Switch(Tap):
+class PillSwitch(Tap):
     value = BooleanProperty(False)
 
     def __init__(self, value=False, on_change=None, **kw):
         kw.setdefault('size_hint', (None, None))
         kw.setdefault('size', (dp(46), dp(28)))
-        super(Switch, self).__init__(callback=self._toggle, **kw)
+        super(PillSwitch, self).__init__(callback=self._toggle, **kw)
         self.on_change = on_change
         self.value = value
         self.bind(pos=self._draw, size=self._draw, value=self._draw)
