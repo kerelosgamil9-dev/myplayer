@@ -27,7 +27,7 @@ android.archs = arm64-v8a
 android.accept_sdk_license = True
 android.allow_backup = True
 android.logcat_filters = *:S python:D
-
+p4a.branch = v2024.01.21
 [buildozer]
 log_level = 2
 warn_on_root = 1
