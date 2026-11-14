@@ -20,20 +20,82 @@ from kivy.app import App                                          # noqa: E402
 from kivy.clock import Clock                                      # noqa: E402
 from kivy.core.window import Window                               # noqa: E402
 
-import bridge                                                     # noqa: E402
-import core                                                       # noqa: E402
-import widgets                                                    # noqa: E402
-from screens import CollectionPage, HomePage, PickerPage, Root   # noqa: E402
-
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
+IMPORT_ERROR = None
+try:
+    import bridge                                                 # noqa: E402
+    import core                                                   # noqa: E402
+    import widgets                                                # noqa: E402
+    from screens import CollectionPage, HomePage, PickerPage, Root   # noqa: E402
+except Exception:
+    IMPORT_ERROR = traceback.format_exc()
+    core = None
+
+
+def error_view(text):
+    """Plain Kivy widgets only: shows a traceback on screen so it can be photographed."""
+    from kivy.uix.boxlayout import BoxLayout
+    from kivy.uix.button import Button
+    from kivy.uix.label import Label
+    from kivy.uix.scrollview import ScrollView
+    box = BoxLayout(orientation='vertical', padding=10, spacing=10)
+    sv = ScrollView(size_hint=(1, 1))
+    lab = Label(text=text, size_hint_y=None, halign='left', valign='top', font_size='12sp',
+                text_size=(Window.width - 30, None), color=(1, 0.8, 0.8, 1))
+    lab.bind(texture_size=lambda inst, val: setattr(inst, 'height', val[1] + 20))
+    sv.add_widget(lab)
+    box.add_widget(sv)
+    btn = Button(text='Close', size_hint=(1, None), height=90)
+    box.add_widget(btn)
+    return box, btn
+
 
 class ProPlayerApp(App):
-    title = core.APP_TITLE
+    title = 'Pro Player'
 
     def build(self):
+        try:
+            if IMPORT_ERROR:
+                raise RuntimeError(IMPORT_ERROR)
+            return self._build()
+        except Exception:
+            tb = traceback.format_exc()
+            Window.clearcolor = (0.1, 0, 0, 1)
+            view, btn = error_view('STARTUP ERROR\n\n' + tb)
+            btn.bind(on_release=lambda *a: self.stop())
+            return view
+
+    def _install_error_overlay(self):
+        from kivy.base import ExceptionHandler, ExceptionManager
+        app = self
+
+        class Handler(ExceptionHandler):
+            def handle_exception(self, inst):
+                try:
+                    app.show_error(traceback.format_exc())
+                except Exception:
+                    pass
+                return ExceptionManager.PASS
+        ExceptionManager.add_handler(Handler())
+
+    def show_error(self, tb):
+        if getattr(self, '_err_view', None) is not None:
+            return
+        view, btn = error_view('ERROR (the app is still running)\n\n' + tb)
+        self._err_view = view
+        Window.add_widget(view)
+
+        def close(*a):
+            Window.remove_widget(view)
+            self._err_view = None
+        btn.bind(on_release=close)
+
+    def _build(self):
+        self._err_view = None
+        self._install_error_overlay()
         widgets.register_fonts()
         Window.clearcolor = (0, 0, 0, 1)
         self.store = core.Store(os.path.join(bridge.data_dir(self), 'library.json'))
