@@ -103,13 +103,24 @@ class ProPlayerApp(App):
         self.thumbs = bridge.ThumbService(self)
         self.loaded = False
         self.permitted = False
+        self.prev_crash = bridge.init_crumbs(self)
         self.root = Root(self)
         self.home = HomePage(self)
         self.root.push(self.home)
         Window.bind(on_keyboard=self._on_keyboard)
         Clock.schedule_once(lambda dt: self.start_up(), 0.2)
+        if self.prev_crash:
+            Clock.schedule_once(lambda dt: self.show_error(
+                'PREVIOUS RUN ENDED ABRUPTLY. Last steps:\n\n' + self.prev_crash), 1.0)
         Clock.schedule_interval(lambda dt: self.store.save(), 20)
+        Clock.schedule_once(self._check_thumbs, 15)
         return self.root
+
+    def _check_thumbs(self, dt):
+        t = getattr(self, 'thumbs', None)
+        if t and t.failed and bridge.LAST_THUMB_ERROR[0] and \
+                not any(f.endswith('.jpg') for f in os.listdir(bridge.cache_dir(self))):
+            self.show_error('THUMBNAILS FAILED:\n\n' + bridge.LAST_THUMB_ERROR[0])
 
     # ---- startup / scanning ------------------------------------------------------
     def start_up(self):
@@ -174,9 +185,11 @@ class ProPlayerApp(App):
         if p:
             p.on_app_pause()
         self.store.save(force=True)
+        bridge.crumb('paused')
         return True
 
     def on_resume(self):
+        bridge.crumb('resumed')
         p = self._player()
         if p:
             p.on_app_resume()
@@ -189,6 +202,7 @@ class ProPlayerApp(App):
             if p:
                 p.on_close()
             self.store.save(force=True)
+            bridge.crumb('clean-exit')
         except Exception:
             traceback.print_exc()
 

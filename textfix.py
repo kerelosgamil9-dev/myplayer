@@ -27,7 +27,7 @@ _LIGS = {}    # alef-variant -> {'isolated':c, 'final':c}   (lam + alef ligature
 
 
 def _build_tables():
-    ranges = list(range(0xFB50, 0xFDFC)) + list(range(0xFE70, 0xFEFD))
+    ranges = list(range(0xFE70, 0xFEFD)) + list(range(0xFB50, 0xFC00))
     for cp in ranges:
         ch = chr(cp)
         dec = unicodedata.decomposition(ch)
@@ -49,7 +49,8 @@ def _build_tables():
                 # first definition wins (FE70.. range is the standard one for the core
                 # letters, FB50.. adds Persian/Urdu/Egyptian letters)
                 _FORMS[base].setdefault(tag, ch)
-        elif len(cps) == 2 and cps[0] == 0x0644 and tag in ('isolated', 'final'):
+        elif (len(cps) == 2 and cps[0] == 0x0644 and cps[1] in (0x622, 0x623, 0x625, 0x627)
+              and tag in ('isolated', 'final') and 0xFE70 <= cp <= 0xFEFC):
             _LIGS.setdefault(chr(cps[1]), {})[tag] = ch
 
 

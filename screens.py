@@ -385,6 +385,10 @@ class Header(Widget):
         self._lay()
 
     def _lay(self, *a):
+        self.canvas.before.clear()
+        with self.canvas.before:
+            Color(0, 0, 0, 1)
+            Rectangle(pos=self.pos, size=self.size)
         x_r = self.right - dp(6)
         for b in self.right_btns:
             b.pos = (x_r - b.width, self.center_y - b.height / 2.0)
@@ -516,10 +520,12 @@ class TabBar(Widget):
         self._lay()
 
     def _lay(self, *a):
-        self.canvas.clear()
+        self.canvas.before.clear()          # never canvas.clear(): it would drop the children
         x = self.right - dp(24)
         self._hit = []
-        with self.canvas:
+        with self.canvas.before:
+            Color(0, 0, 0, 1)
+            Rectangle(pos=self.pos, size=self.size)
             for tid, label in self.tabs:
                 t = self.labels[tid]
                 tw = max(dp(30), t.text_width())

@@ -31,6 +31,49 @@ SCREEN_LANDSCAPE = 6          # sensor landscape (both directions)
 SCREEN_UNSPECIFIED = -1
 
 
+_CRUMB = {'path': None}
+
+
+def init_crumbs(app):
+    """Breadcrumb file: survives native crashes, shown on the next start."""
+    try:
+        p = os.path.join(data_dir(app), 'last_run.txt')
+        prev = ''
+        if os.path.exists(p):
+            with open(p, encoding='utf8', errors='replace') as f:
+                prev = f.read().strip()
+        _CRUMB['path'] = p
+        crumb_reset()
+        crumb('start')
+        if prev and not prev.endswith(('clean-exit', 'paused')):
+            return prev[-600:]
+    except Exception:
+        pass
+    return ''
+
+
+def crumb(msg):
+    p = _CRUMB.get('path')
+    if not p:
+        return
+    try:
+        with open(p, 'a', encoding='utf8') as f:
+            f.write(msg + '\n')
+            f.flush()
+            os.fsync(f.fileno())
+    except Exception:
+        pass
+
+
+def crumb_reset():
+    p = _CRUMB.get('path')
+    if p:
+        try:
+            open(p, 'w').close()
+        except Exception:
+            pass
+
+
 def log(*a):
     try:
         print('[ProPlayer]', *a)
@@ -220,46 +263,68 @@ def thumb_path(app, video):
     return os.path.join(cache_dir(app), h + '.jpg')
 
 
-def _make_thumb_android(path, out, duration):
-    MMR = autoclass('android.media.MediaMetadataRetriever')
+LAST_THUMB_ERROR = ['']
+
+
+def _save_bitmap(bmp, out):
     Bitmap = autoclass('android.graphics.Bitmap')
     CF = autoclass('android.graphics.Bitmap$CompressFormat')
     FOS = autoclass('java.io.FileOutputStream')
+    w, h = bmp.getWidth(), bmp.getHeight()
+    if w <= 0 or h <= 0:
+        return False
+    tw = 480
+    if w > tw:
+        bmp = Bitmap.createScaledBitmap(bmp, tw, max(1, int(h * tw / float(w))), True)
+    fos = FOS(out + '.part')
+    try:
+        ok = bmp.compress(CF.JPEG, 82, fos)
+        fos.flush()
+    finally:
+        fos.close()
+    if ok:
+        os.replace(out + '.part', out)
+    return bool(ok)
+
+
+def _make_thumb_android(video, out):
+    """Try several ways to get a frame; returns True when a JPEG was written."""
+    path = video['path']
+    duration = video.get('duration', 0)
+    errors = []
+    # 1) system thumbnail through the content uri (Android 10+)
+    try:
+        if video.get('id') and sdk_int() >= 29:
+            ContentUris = autoclass('android.content.ContentUris')
+            MS = autoclass('android.provider.MediaStore$Video$Media')
+            Size = autoclass('android.util.Size')
+            uri = ContentUris.withAppendedId(MS.EXTERNAL_CONTENT_URI, int(video['id']))
+            bmp = _activity().getContentResolver().loadThumbnail(uri, Size(480, 270), None)
+            if bmp is not None and _save_bitmap(bmp, out):
+                return True
+    except Exception as e:
+        errors.append('loadThumbnail: %s' % e)
+    # 2) frame grabber
+    MMR = autoclass('android.media.MediaMetadataRetriever')
     mmr = MMR()
-    fos = None
     try:
         mmr.setDataSource(path)
         t = int(min(max(duration * 0.1, 1.0), 10.0) * 1000000) if duration else 1000000
-        bmp = mmr.getFrameAtTime(t, 2)       # OPTION_CLOSEST_SYNC
+        bmp = mmr.getFrameAtTime(t, 2)
         if bmp is None:
             bmp = mmr.getFrameAtTime(-1)
-        if bmp is None:
-            return False
-        w, h = bmp.getWidth(), bmp.getHeight()
-        if w <= 0 or h <= 0:
-            return False
-        tw = 480
-        th = max(1, int(h * tw / float(w)))
-        if w > tw:
-            bmp = Bitmap.createScaledBitmap(bmp, tw, th, True)
-        fos = FOS(out + '.part')
-        ok = bmp.compress(CF.JPEG, 82, fos)
-        fos.flush()
-        fos.close()
-        fos = None
-        if ok:
-            os.replace(out + '.part', out)
-        return bool(ok)
+        if bmp is not None and _save_bitmap(bmp, out):
+            return True
+        errors.append('no frame')
+    except Exception as e:
+        errors.append('mmr: %s' % e)
     finally:
-        try:
-            if fos is not None:
-                fos.close()
-        except Exception:
-            pass
         try:
             mmr.release()
         except Exception:
             pass
+    LAST_THUMB_ERROR[0] = '; '.join(errors)[:300]
+    return False
 
 
 class ThumbService(object):
@@ -309,8 +374,9 @@ class ThumbService(object):
                 video, out = self.queue.pop(0)
             ok = False
             try:
-                ok = _make_thumb_android(video['path'], out, video.get('duration', 0))
+                ok = _make_thumb_android(video, out)
             except Exception:
+                LAST_THUMB_ERROR[0] = traceback.format_exc()[-300:]
                 log('thumb failed', video['path'])
             key = video['path']
             with self.lock:

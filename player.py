@@ -220,6 +220,7 @@ class PlayerPage(Page):
         if start is None:
             start = self.lib.resume_pos(key) if self.store.setting('resume') else 0.0
         self.lib.mark_started(key)
+        bridge.crumb('player: load %s' % v['path'])
         self.engine.open(v['path'], start=start, speed=self.speed, paused=False,
                          duration_hint=v.get('duration', 0))
         self._sync_play_icon()
@@ -272,7 +273,13 @@ class PlayerPage(Page):
             self._oriented = True
             if self.store.setting('auto_rotate'):
                 w, h = self.engine.size
-                bridge.set_orientation(bridge.SCREEN_LANDSCAPE if w >= h else bridge.SCREEN_PORTRAIT)
+                mode = bridge.SCREEN_LANDSCAPE if w >= h else bridge.SCREEN_PORTRAIT
+
+                def rot(dt, mode=mode):
+                    if not self._closed:
+                        bridge.crumb('player: orientation %s' % mode)
+                        bridge.set_orientation(mode)
+                Clock.schedule_once(rot, 0.4)
 
     def _on_eof(self):
         if self._closed:

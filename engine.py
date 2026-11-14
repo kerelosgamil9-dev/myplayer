@@ -17,6 +17,7 @@ import traceback
 from kivy.clock import Clock
 from kivy.graphics.texture import Texture
 
+import bridge
 import core
 
 try:
@@ -77,8 +78,7 @@ class VideoEngine(object):
     def _start_player(self, start):
         if self.player is not None:
             self._close_player()
-        opts = {'paused': self.paused, 'out_fmt': 'rgba', 'sn': True,
-                'volume': self._volume, 'framedrop': True}
+        opts = {'paused': self.paused, 'out_fmt': 'rgba', 'volume': self._volume}
         af = core.atempo_chain(self.speed)
         vf = core.setpts_filter(self.speed)
         if af:
@@ -87,6 +87,7 @@ class VideoEngine(object):
             opts['vf'] = vf
         if start > 0.5:
             opts['ss'] = float(start)
+        bridge.crumb('engine: open %s ss=%s speed=%s' % (self.path, start, self.speed))
         try:
             self.player = MediaPlayer(self.path, thread_lib='SDL', loglevel='error', ff_opts=opts)
         except Exception as e:
@@ -95,6 +96,7 @@ class VideoEngine(object):
             if self.on_error:
                 self.on_error(str(e))
             return
+        bridge.crumb('engine: opened')
         self._anchor_media = float(start)
         self._anchor_pts = None
         self._last_pts = None
@@ -245,6 +247,8 @@ class VideoEngine(object):
         if frame is None:
             return
         img, pts = frame
+        if not self.ready:
+            bridge.crumb('engine: first frame')
         try:
             w, h = img.get_size()
         except Exception:
@@ -254,6 +258,8 @@ class VideoEngine(object):
             self.texture.flip_vertical()
             self.size = (w, h)
         try:
+            if not self.ready:
+                bridge.crumb('engine: blit %dx%d' % (w, h))
             self.texture.blit_buffer(img.to_memoryview()[0], colorfmt='rgba')
         except Exception:
             traceback.print_exc()
