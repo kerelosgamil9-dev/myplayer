@@ -155,6 +155,16 @@ def _arc(cx, cy, r, a0, a1, n=18):
     return pts
 
 
+def _arrow_head(cx, cy, r, a, h=4.0):
+    import math
+    ar = math.radians(a)
+    ex, ey = cx + r * math.cos(ar), cy + r * math.sin(ar)
+    tx, ty = -math.sin(ar), math.cos(ar)
+    nx, ny = math.cos(ar), math.sin(ar)
+    return [(ex - tx * h + nx * h * 0.8, ey - ty * h + ny * h * 0.8), (ex, ey),
+            (ex - tx * h - nx * h * 0.8, ey - ty * h - ny * h * 0.8)]
+
+
 ICONS = {
     'play': [('fill', [(7, 4), (20, 12), (7, 20)])],
     'pause': [('rect', 6, 4, 4, 16), ('rect', 14, 4, 4, 16)],
@@ -186,14 +196,15 @@ ICONS = {
                  ('dot', 4, 7, 1.3), ('dot', 4, 12, 1.3), ('dot', 4, 17, 1.3)],
     'select_all': [('line', [(4, 7), (4, 20), (17, 20)]), ('line', [(8, 4), (20, 4), (20, 16), (8, 16), (8, 4)]),
                    ('line', [(11, 10), (13.5, 12.5), (17, 8)])],
-    'rotate': [('line', _arc(12, 12, 8, -40, 250)), ('line', [(16, 3.5), (18.5, 5), (17, 8.5)])],
+    'rotate': [('line', _arc(12, 12, 7.5, 45, 335)), ('line', _arrow_head(12, 12, 7.5, 335, 5.0))],
     'lock': [('line', [(6, 11), (18, 11), (19.5, 12.5), (19.5, 19), (18, 20.5), (6, 20.5), (4.5, 19), (4.5, 12.5), (6, 11)]),
              ('line', [(8, 11), (8, 8)] + _arc(12, 8, 4, 180, 360) + [(16, 8), (16, 11)]), ('dot', 12, 15.8, 1.5)],
     'unlock': [('line', [(6, 11), (18, 11), (19.5, 12.5), (19.5, 19), (18, 20.5), (6, 20.5), (4.5, 19), (4.5, 12.5), (6, 11)]),
                ('line', [(8, 11), (8, 8)] + _arc(12, 8, 4, 180, 360) + [(16, 8), (16, 5.5)]), ('dot', 12, 15.8, 1.5)],
     'speed': [('line', _arc(12, 14, 9, 180, 360)), ('line', [(12, 14), (17, 9)]), ('line', [(3, 14), (21, 14)])],
-    'subtitle': [('line', [(5, 5), (19, 5), (21, 7), (21, 17), (19, 19), (5, 19), (3, 17), (3, 7), (5, 5)]),
-                 ('line', [(7, 11.5), (10.5, 11.5)]), ('line', [(13.5, 11.5), (17, 11.5)]), ('line', [(7, 15), (12, 15)])],
+    'subtitle': [('line', [(5, 4), (19, 4), (21, 6), (21, 15), (19, 17), (11.5, 17), (7, 21), (7, 17), (5, 17), (3, 15), (3, 6), (5, 4)]),
+                 ('line', [(7, 9), (11.5, 9)]), ('line', [(14, 9), (17, 9)]),
+                 ('line', [(7, 12.5), (9.5, 12.5)]), ('line', [(12, 12.5), (17, 12.5)])],
     'audio': [('dot', 8, 18, 3), ('line', [(11, 18), (11, 5), (19, 7.5)])],
     'brightness': [('circle', 12, 12, 4)] + [('line', [(12 + 7 * math.cos(math.radians(a)), 12 + 7 * math.sin(math.radians(a))),
                                                        (12 + 10 * math.cos(math.radians(a)), 12 + 10 * math.sin(math.radians(a)))])
@@ -226,7 +237,7 @@ ICONS = {
 class Icon(Widget):
     name = StringProperty('play')
     color = ListProperty([1, 1, 1, 1])
-    stroke = NumericProperty(1.8)       # in 24-grid units
+    stroke = NumericProperty(1.5)       # in 24-grid units
 
     def __init__(self, **kw):
         kw.setdefault('size_hint', (None, None))

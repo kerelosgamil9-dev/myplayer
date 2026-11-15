@@ -57,6 +57,9 @@ class VideoEngine(object):
         self._closing = False
         self.audio = None
         self._seek_after = None
+        self._seek_time = 0.0
+        self._seek_target = 0.0
+        self._vf_on = False
         self._last_sync = 0.0
         self.last_seek_error = ''
 
@@ -128,6 +131,7 @@ class VideoEngine(object):
             bridge.crumb('engine: open L%d %s speed=%s' % (level, self.path, self.speed))
             try:
                 self.player = MediaPlayer(self.path, thread_lib=thread_lib, loglevel='error', ff_opts=o)
+                self._vf_on = 'vf' in o
                 break
             except Exception as ex:
                 errs.append('%s opts=%r' % (ex, o))
@@ -174,6 +178,17 @@ class VideoEngine(object):
     @property
     def position(self):
         """Current media position in seconds."""
+        if time.time() - self._seek_time < 0.7:
+            return self._seek_target          # a seek was just requested: report its target
+        if self.audio is not None:
+            ap = self.audio.position()        # the audio clock is the master clock
+            if ap is not None:
+                if self.duration:
+                    ap = min(ap, self.duration)
+                return max(0.0, ap)
+        return self._video_pos()
+
+    def _video_pos(self):
         if self._anchor_pts is None or self._last_pts is None:
             return self._anchor_media if self._pending_seek is None else self._pending_seek
         pos = self._anchor_media + (self._last_pts - self._anchor_pts) * self.speed
@@ -236,6 +251,8 @@ class VideoEngine(object):
         if self.duration:
             t = min(t, max(0.0, self.duration - 0.05))
         self.eof = False
+        self._seek_time = time.time()
+        self._seek_target = t
         if self.audio is not None:
             self.audio.seek(t)
             if not self.paused:
@@ -370,14 +387,17 @@ class VideoEngine(object):
                     self._anchor_media = t
                     self._anchor_pts = None
                     self._last_pts = None
-        elif self.audio is not None and not self.paused and self._anchor_pts is not None:
-            if now - self._last_sync > 1.0:
-                self._last_sync = now
-                ap = self.audio.position()
-                if ap is not None and abs(ap - self.position) > 0.35 and not self.eof:
-                    if self._do_seek(ap, False):
-                        self._anchor_media = ap
-                        self._anchor_pts = None
-                        self._last_pts = None
+        elif self.audio is not None and not self.paused and self._last_pts is not None \
+                and now - self._seek_time > 1.5 and now - self._last_sync > 1.0:
+            self._last_sync = now
+            ap = self.audio.position()
+            vm = self._last_pts * (self.speed if self._vf_on else 1.0)
+            if ap is not None and abs(ap - vm) > 0.5 and not self.eof:
+                if self._do_seek(ap, False):
+                    self._seek_time = now
+                    self._seek_target = ap
+                    self._anchor_media = ap
+                    self._anchor_pts = None
+                    self._last_pts = None
         if self.on_frame:
             self.on_frame(self.texture)

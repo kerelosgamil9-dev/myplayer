@@ -349,7 +349,7 @@ class PlayerPage(Page):
         self.engine.seek(target)
         self._ended = False
         if show:
-            self.fb.show('%s%d ث' % ('+' if delta > 0 else '−', abs(int(delta))), self._center(), duration=0.7)
+            self.fb.show('%s%d' % ('+' if delta > 0 else '-', abs(int(delta))), self._center(), w=dp(96), duration=0.7)
         self.show_controls(True)
 
     def set_speed(self, s, say=True):
