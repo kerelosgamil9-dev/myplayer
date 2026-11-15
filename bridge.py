@@ -48,7 +48,10 @@ def init_crumbs(app):
         if prev and not prev.endswith(('clean-exit', 'paused')):
             last = prev.strip().split('\n')[-1]
             note = ''
-            if last.startswith(('engine: open', 'player: load', 'engine: get_frame')):
+            if last.startswith('hw:'):
+                disable_hw('crash at: ' + last)
+                note = '\n\n>> hardware playback disabled (it crashed); using software playback'
+            elif last.startswith(('engine: open', 'player: load', 'engine: get_frame')):
                 note = '\n\n>> switching playback mode to level %d' % bump_engine_level()
             return prev[-600:] + note
     except Exception:
@@ -86,6 +89,28 @@ def bump_engine_level():
     except Exception:
         pass
     return n
+
+
+def _hw_flag():
+    p = _CRUMB.get('path')
+    return os.path.join(os.path.dirname(p), 'hw_disabled.txt') if p else None
+
+
+def hw_enabled():
+    if not ANDROID:
+        return False
+    p = _hw_flag()
+    return not (p and os.path.exists(p))
+
+
+def disable_hw(reason=''):
+    p = _hw_flag()
+    if p:
+        try:
+            with open(p, 'w') as f:
+                f.write(reason or 'disabled')
+        except Exception:
+            pass
 
 
 def crumb(msg):

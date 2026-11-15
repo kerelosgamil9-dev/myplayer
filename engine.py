@@ -414,3 +414,64 @@ class VideoEngine(object):
                     self._last_pts = None
         if self.on_frame:
             self.on_frame(self.texture)
+
+
+
+class Engine(object):
+    """What the player page uses: hardware playback (Android MediaPlayer) when it
+    works, ffpyplayer software playback otherwise.  Same interface as VideoEngine."""
+
+    def __init__(self, on_frame=None, on_eof=None, on_error=None):
+        self._cb = (on_frame, on_eof, on_error)
+        self.sw = VideoEngine(on_frame=on_frame, on_eof=on_eof, on_error=on_error)
+        self.hw = None
+        self.impl = self.sw
+        self._speed = 1.0
+        self._volume = 1.0
+
+    def __getattr__(self, name):
+        if name in ('sw', 'hw', 'impl', '_cb'):
+            raise AttributeError(name)
+        return getattr(self.impl, name)
+
+    def open(self, path, start=0.0, speed=1.0, paused=False, duration_hint=0.0):
+        self._speed = speed
+        if self.hw is not None:
+            self.hw.close(keep_texture=True)
+        self.sw.close(keep_texture=True)
+        if bridge.hw_enabled():
+            try:
+                from hwengine import HWEngine
+                if self.hw is None:
+                    self.hw = HWEngine(on_frame=self._cb[0], on_eof=self._cb[1], on_error=self._cb[2],
+                                       on_fail=self._hw_failed)
+                self.hw.set_volume(self._volume)
+                if self.hw.open(path, start, speed, paused, duration_hint):
+                    self.impl = self.hw
+                    return True
+                bridge.crumb('hw: falling back (%s)' % self.hw.last_error)
+                if not getattr(self, '_warned', False) and self._cb[2]:
+                    self._warned = True
+                    self._cb[2]('Hardware playback not available, using software: %s' % self.hw.last_error)
+            except Exception:
+                traceback.print_exc()
+        self.impl = self.sw
+        return self.sw.open(path, start, speed, paused, duration_hint)
+
+    def _hw_failed(self, path, pos, msg):
+        bridge.crumb('hw: runtime failure %s' % msg)
+        bridge.disable_hw(msg)
+        self.impl = self.sw
+        if path:
+            self.sw.open(path, pos, self._speed, self.sw.paused, self.hw.duration if self.hw else 0.0)
+        if self._cb[2]:
+            self._cb[2]('Hardware playback failed, switched to software: %s' % msg)
+
+    def set_volume(self, v):
+        self._volume = v
+        self.impl.set_volume(v)
+
+    def close(self, keep_texture=False):
+        if self.hw is not None:
+            self.hw.close(keep_texture)
+        self.sw.close(keep_texture)

@@ -22,7 +22,7 @@ from kivy.uix.widget import Widget
 
 import bridge
 import core
-from engine import VideoEngine
+from engine import Engine
 from screens import Page
 from widgets import (ACCENT, SUB, ChipsRow, Dialog, Icon, IconButton, MenuSheet, SeekBar,
                      SheetLabel, SheetRow, SheetTitle, Tap, Txt)
@@ -135,7 +135,7 @@ class PlayerPage(Page):
         self._brightness = None
         self._ended = False
         self._last_up = 0.0
-        self.engine = VideoEngine(on_frame=self._on_frame, on_eof=self._on_eof, on_error=self._on_error)
+        self.engine = Engine(on_frame=self._on_frame, on_eof=self._on_eof, on_error=self._on_error)
 
         with self.canvas.before:
             Color(1, 1, 1, 1)
