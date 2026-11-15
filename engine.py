@@ -87,9 +87,13 @@ class VideoEngine(object):
             opts['vf'] = vf
         if start > 0.5:
             opts['ss'] = float(start)
-        bridge.crumb('engine: open %s ss=%s speed=%s' % (self.path, start, self.speed))
+        level = bridge.engine_level()
+        thread_lib = 'threading' if level in (1, 3) else 'SDL'
+        if level in (2, 3):
+            opts['an'] = True               # no audio at all (safest mode)
+        bridge.crumb('engine: open L%d %s ss=%s speed=%s' % (level, self.path, start, self.speed))
         try:
-            self.player = MediaPlayer(self.path, thread_lib='SDL', loglevel='error', ff_opts=opts)
+            self.player = MediaPlayer(self.path, thread_lib=thread_lib, loglevel='error', ff_opts=opts)
         except Exception as e:
             traceback.print_exc()
             self.player = None
@@ -101,6 +105,7 @@ class VideoEngine(object):
         self._anchor_pts = None
         self._last_pts = None
         self._open_time = time.time()
+        self._crumb_gf = False
         self._next_poll = 0.0
         self.eof = False
 
@@ -221,10 +226,15 @@ class VideoEngine(object):
         if p is None:
             return
         now = time.time()
-        if not self._meta_done and (now - self._open_time) < 15:
-            self._read_meta()
+        if self.ready and not self._meta_done and (now - self._open_time) < 15:
+            if now >= getattr(self, '_next_meta', 0):
+                self._next_meta = now + 0.5
+                self._read_meta()
         if now < self._next_poll:
             return
+        if not self.ready and not getattr(self, '_crumb_gf', False):
+            self._crumb_gf = True
+            bridge.crumb('engine: get_frame')
         try:
             frame, val = p.get_frame()
         except Exception:

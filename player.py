@@ -339,7 +339,7 @@ class PlayerPage(Page):
     def _sync_speed_tag(self):
         if abs(self.speed - 1.0) > 1e-6 and not self.hold_active:
             self.speed_tag.show(core.fmt_speed(self.speed),
-                                (self.center_x, self.top - dp(86)), w=dp(70), h=dp(30))
+                                ((self.x + self.width / 2.0), (self.y + self.height) - dp(86)), w=dp(70), h=dp(30))
             self.speed_tag.lbl.font_size = sp(14)
         else:
             self.speed_tag.hide()
@@ -450,7 +450,7 @@ class PlayerPage(Page):
 
     # ------------------------------------------------------------------ geometry
     def _center(self):
-        return (self.center_x, self.center_y + dp(50))
+        return ((self.x + self.width / 2.0), (self.y + self.height / 2.0) + dp(50))
 
     def _place_video(self):
         w, h = self.engine.size
@@ -550,7 +550,7 @@ class PlayerPage(Page):
         hs = float(self.store.setting('hold_speed') or 2.0)
         self.speed_tag.hide()
         self.hold_pill.show(core.fmt_speed(hs),
-                            (self.center_x, self.top - dp(86)), w=dp(90), h=dp(36))
+                            ((self.x + self.width / 2.0), (self.y + self.height) - dp(86)), w=dp(90), h=dp(36))
         if self.store.setting('vibrate'):
             bridge.vibrate(15)
         if abs(hs - self.speed) > 1e-6:
@@ -569,7 +569,7 @@ class PlayerPage(Page):
                     if abs(dx) > abs(dy):
                         g['mode'] = 'seek'
                         g['base'] = self.engine.position
-                    elif g['sx'] < self.center_x:
+                    elif g['sx'] < (self.x + self.width / 2.0):
                         g['mode'] = 'bright'
                         g['base'] = bridge.get_brightness()
                     else:
@@ -594,11 +594,11 @@ class PlayerPage(Page):
                 bridge.set_brightness(v)
                 self._brightness = v
                 self.hud.show('%d%%  سطوع' % int(v * 100),
-                              (self.x + dp(90), self.center_y), w=dp(130), h=dp(40))
+                              (self.x + dp(90), (self.y + self.height / 2.0)), w=dp(130), h=dp(40))
             elif mode == 'vol':
                 v = max(0.0, min(1.0, g['base'] + dy / (self.height * 0.7)))
                 bridge.set_volume(v)
-                self.hud.show('%d%%  صوت' % int(v * 100), (self.right - dp(90), self.center_y),
+                self.hud.show('%d%%  صوت' % int(v * 100), ((self.x + self.width) - dp(90), (self.y + self.height / 2.0)),
                               w=dp(130), h=dp(40))
             return True
         return Page.on_touch_move(self, touch)

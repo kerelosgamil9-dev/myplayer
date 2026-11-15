@@ -193,10 +193,10 @@ class ListRow(Row):
             if sel:
                 Color(ACCENT[0], ACCENT[1], ACCENT[2], 0.13)
                 Rectangle(pos=self.pos, size=self.size)
-        _draw_check(self.canvas.before, self.x + dp(30), self.center_y, dp(11), sel)
+        _draw_check(self.canvas.before, self.x + dp(30), (self.y + self.height / 2.0), dp(11), sel)
         if ctx.reorder:
             self.handle.opacity = 1
-            self.handle.center = (self.x + dp(72), self.center_y)
+            self.handle.center = (self.x + dp(72), (self.y + self.height / 2.0))
         else:
             self.handle.opacity = 0
 
@@ -253,13 +253,13 @@ class VideoRow(ListRow):
         self.draw_selection()
         tw, th = dp(128), dp(72)
         self.thumb.size = (tw, th)
-        self.thumb.pos = (self.right - dp(16) - tw, self.center_y - th / 2.0)
+        self.thumb.pos = ((self.x + self.width) - dp(16) - tw, (self.y + self.height / 2.0) - th / 2.0)
         left = self.left_bound()
         tx_right = self.thumb.x - dp(12)
         w = max(10, tx_right - left)
-        self.title.pos = (left, self.center_y)
+        self.title.pos = (left, (self.y + self.height / 2.0))
         self.title.size = (w, th / 2.0 + dp(6))
-        self.info.pos = (left, self.center_y - th / 2.0 + dp(2))
+        self.info.pos = (left, (self.y + self.height / 2.0) - th / 2.0 + dp(2))
         self.info.size = (w, th / 2.0 - dp(8))
         bw = dp(46) if self.badge.ltext else 0
         self.badge.size = (bw, dp(18))
@@ -305,17 +305,17 @@ class CollRow(ListRow):
         self.draw_selection()
         tw, th = dp(142), dp(80)
         self.thumb.size = (tw, th)
-        self.thumb.pos = (self.right - dp(16) - tw, self.center_y - th / 2.0 - dp(3))
+        self.thumb.pos = ((self.x + self.width) - dp(16) - tw, (self.y + self.height / 2.0) - th / 2.0 - dp(3))
         left = self.left_bound()
         w = max(10, self.thumb.x - dp(14) - left)
-        self.title.pos = (left, self.center_y)
+        self.title.pos = (left, (self.y + self.height / 2.0))
         self.title.size = (w, dp(30))
-        self.info.pos = (left, self.center_y - dp(30))
+        self.info.pos = (left, (self.y + self.height / 2.0) - dp(30))
         self.info.size = (w, dp(30))
         self.canvas.after.clear()
         with self.canvas.after:               # the "stack" strip above the cover
             Color(0.32, 0.32, 0.33, 1)
-            RoundedRectangle(pos=(self.thumb.x + dp(12), self.thumb.top - dp(1)),
+            RoundedRectangle(pos=(self.thumb.x + dp(12), (self.thumb.y + self.thumb.height) - dp(1)),
                              size=(tw - dp(24), dp(8)), radius=[dp(5), dp(5), 0, 0])
 
 
@@ -331,8 +331,8 @@ class CreateRow(Row):
 
     def relayout(self):
         tw, th = dp(142), dp(80)
-        x = self.right - dp(16) - tw
-        y = self.center_y - th / 2.0 - dp(3)
+        x = (self.x + self.width) - dp(16) - tw
+        y = (self.y + self.height / 2.0) - th / 2.0 - dp(3)
         self.canvas.before.clear()
         with self.canvas.before:
             Color(0.32, 0.32, 0.33, 1)
@@ -341,7 +341,7 @@ class CreateRow(Row):
             Color(0.87, 0.87, 0.88, 1)
             RoundedRectangle(pos=(x, y), size=(tw, th), radius=[dp(14)])
         self.plus.center = (x + tw / 2.0, y + th / 2.0)
-        self.label.pos = (self.x + dp(16), self.center_y - dp(20))
+        self.label.pos = (self.x + dp(16), (self.y + self.height / 2.0) - dp(20))
         self.label.size = (x - dp(14) - self.x - dp(16), dp(40))
 
 
@@ -389,27 +389,27 @@ class Header(Widget):
         with self.canvas.before:
             Color(0, 0, 0, 1)
             Rectangle(pos=self.pos, size=self.size)
-        x_r = self.right - dp(6)
+        x_r = (self.x + self.width) - dp(6)
         for b in self.right_btns:
-            b.pos = (x_r - b.width, self.center_y - b.height / 2.0)
+            b.pos = (x_r - b.width, (self.y + self.height / 2.0) - b.height / 2.0)
             x_r -= b.width
         x_l = self.x + dp(6)
         for b in self.left_btns:
-            b.pos = (x_l, self.center_y - b.height / 2.0)
+            b.pos = (x_l, (self.y + self.height / 2.0) - b.height / 2.0)
             x_l += b.width
         if not self.right_btns:
-            x_r = self.right - dp(16)
+            x_r = (self.x + self.width) - dp(16)
         if self.extra is not None:
-            self.extra.pos = (x_l + dp(4), self.center_y - self.extra.height / 2.0)
+            self.extra.pos = (x_l + dp(4), (self.y + self.height / 2.0) - self.extra.height / 2.0)
             self.extra.width = max(10, x_r - x_l - dp(10))
             self.title.size = (0, 0)
             self.sub.size = (0, 0)
             return
         w = max(10, x_r - x_l - dp(8))
         if self.sub.ltext:
-            self.title.pos = (x_l + dp(4), self.center_y - dp(2))
+            self.title.pos = (x_l + dp(4), (self.y + self.height / 2.0) - dp(2))
             self.title.size = (w, dp(28))
-            self.sub.pos = (x_l + dp(4), self.center_y - dp(26))
+            self.sub.pos = (x_l + dp(4), (self.y + self.height / 2.0) - dp(26))
             self.sub.size = (w, dp(24))
         else:
             self.title.pos = (x_l + dp(4), self.y + (dp(4) if self.big else 0))
@@ -521,7 +521,7 @@ class TabBar(Widget):
 
     def _lay(self, *a):
         self.canvas.before.clear()          # never canvas.clear(): it would drop the children
-        x = self.right - dp(24)
+        x = (self.x + self.width) - dp(24)
         self._hit = []
         with self.canvas.before:
             Color(0, 0, 0, 1)
@@ -536,7 +536,7 @@ class TabBar(Widget):
                 if active:
                     Color(*ACCENT)
                     RoundedRectangle(pos=(t.x, self.y), size=(t.width, dp(3)), radius=[dp(1.5)])
-                self._hit.append((t.x - dp(10), t.right + dp(10), tid))
+                self._hit.append((t.x - dp(10), (t.x + t.width) + dp(10), tid))
                 x = t.x - dp(26)
 
     def on_touch_down(self, touch):
@@ -579,7 +579,7 @@ class NavBar(Widget):
         n = len(self.items)
         cw = self.width / float(n)
         for i, (nid, icon, label) in enumerate(self.items):
-            cx = self.right - cw * (i + 0.5)
+            cx = (self.x + self.width) - cw * (i + 0.5)
             ic, lb = self.icons[nid], self.labels[nid]
             col = ACCENT if nid == self.current else (0.62, 0.62, 0.64, 1)
             ic.color = list(col)
@@ -592,7 +592,7 @@ class NavBar(Widget):
         if not self.collide_point(*touch.pos):
             return False
         n = len(self.items)
-        i = int((self.right - touch.x) // (self.width / float(n)))
+        i = int(((self.x + self.width) - touch.x) // (self.width / float(n)))
         i = max(0, min(n - 1, i))
         self.on_pick(self.items[i][0])
         return True
@@ -613,7 +613,7 @@ class SwitchRow(Widget):
         self.bind(pos=self._lay, size=self._lay)
 
     def _lay(self, *a):
-        self.sw.pos = (self.x + dp(18), self.center_y - self.sw.height / 2.0)
+        self.sw.pos = (self.x + dp(18), (self.y + self.height / 2.0) - self.sw.height / 2.0)
         self.lbl.pos = (self.x + dp(18) + self.sw.width + dp(10), self.y)
         self.lbl.size = (self.width - dp(36) - self.sw.width - dp(10), self.height)
 
@@ -722,7 +722,7 @@ class SettingsPane(FloatLayout):
 class ListPageMixin(object):
     def init_list(self):
         self.ctx = Ctx(self.app)
-        self.vlist = VList(ROW_FACTORIES, row_h=dp(100))
+        self.vlist = VList(ROW_FACTORIES, row_h=dp(100), size_hint=(None, None))
         self.vlist.ctx = self.ctx
         self.vlist.on_tap = self._tap
         self.vlist.on_long = self._long
@@ -832,7 +832,7 @@ def delete_videos_dialog(app, keys, after):
 # Home page
 # ---------------------------------------------------------------------------
 class HomePage(Page, ListPageMixin):
-    TABS = [('videos', 'مقاطع فيديو'), ('folders', 'المجلدات'), ('playlists', 'قوائم التشغيل')]
+    TABS = [('videos', 'مقاطع فيديو'), ('playlists', 'قوائم التشغيل')]
     NAVS = [('library', 'folder_play', 'على الجهاز'), ('history', 'clock', 'السجل'), ('me', 'person', 'أنا')]
 
     def __init__(self, app, **kw):
@@ -846,15 +846,16 @@ class HomePage(Page, ListPageMixin):
         self.header = Header()
         self.tabs = TabBar(self.TABS, self.set_tab)
         self.tabs.set_current(self.mode)
-        self.navbar = NavBar(self.NAVS, self.set_nav)
-        self.me = SettingsPane(app)
+        self.navbar = NavBar(self.NAVS, self.set_nav)     # kept for code paths, never shown
+        self.me = SettingsPane(app, size_hint=(None, None))
         self.empty = Txt(ltext='', halign='center', color=SUB, font_size=sp(16), nlines=3,
                          size_hint=(None, None))
-        for w in (self.vlist, self.header, self.tabs, self.navbar, self.empty):
+        for w in (self.vlist, self.header, self.tabs, self.empty):
             self.add_widget(w)
         self.btn_search = IconButton('search', callback=lambda w: self.toggle_search(True))
         self.btn_sort = IconButton('sort', callback=lambda w: self.open_sort())
         self.btn_close = IconButton('close', callback=lambda w: self.exit_selection())
+        self.btn_menu = IconButton('dots', callback=lambda w: self.app.root.push(SettingsPage(self.app)))
         self.bind(pos=self._lay, size=self._lay)
         self._lay()
         self.update_header()
@@ -862,12 +863,10 @@ class HomePage(Page, ListPageMixin):
     # ---- layout ------------------------------------------------------------
     def _lay(self, *a):
         W, H = self.size
-        nb = dp(60)
-        self.navbar.size = (W, nb)
-        self.navbar.pos = (self.x, self.y)
+        nb = 0
         hh = dp(72) if (self.nav == 'library' and not self.ctx.sel_mode) else dp(60)
         self.header.size = (W, hh)
-        self.header.pos = (self.x, self.top - hh)
+        self.header.pos = (self.x, (self.y + self.height) - hh)
         top = self.header.y
         if self.nav == 'library':
             self.tabs.size = (W, dp(48))
@@ -932,6 +931,7 @@ class HomePage(Page, ListPageMixin):
         return False
 
     def on_show(self):
+        self.vlist.scroll = 0
         self.rebuild()
 
     def refresh(self):
@@ -1014,7 +1014,7 @@ class HomePage(Page, ListPageMixin):
         elif self.nav == 'me':
             self.header.set('أنا', '', [], [])
         else:
-            left = [self.btn_search]
+            left = [self.btn_menu, self.btn_search]
             if self.mode != 'folders':
                 left.append(self.btn_sort)
             self.header.set('على الجهاز', '', [], left, big=True)
@@ -1191,6 +1191,30 @@ class HomePage(Page, ListPageMixin):
 # ---------------------------------------------------------------------------
 # Collection page (one playlist / folder)
 # ---------------------------------------------------------------------------
+class SettingsPage(Page):
+    """The options (what used to be the 'Me' tab), opened from the 3-dots button."""
+
+    def __init__(self, app, **kw):
+        super(SettingsPage, self).__init__(app, **kw)
+        self.header = Header()
+        self.pane = SettingsPane(app)
+        self.add_widget(self.pane)
+        self.add_widget(self.header)
+        self.header.set('الإعدادات', '', [IconButton('back', callback=lambda w: self.app.root.back())], [])
+        self.bind(pos=self._lay, size=self._lay)
+        self._lay()
+
+    def _lay(self, *a):
+        hh = dp(60)
+        self.header.size = (self.width, hh)
+        self.header.pos = (self.x, (self.y + self.height) - hh)
+        self.pane.pos = self.pos
+        self.pane.size = (self.width, max(0, (self.y + self.height) - hh - self.y))
+
+    def refresh(self):
+        self.pane.build()
+
+
 class CollectionPage(Page, ListPageMixin):
     def __init__(self, app, cid, **kw):
         super(CollectionPage, self).__init__(app, **kw)
@@ -1224,12 +1248,12 @@ class CollectionPage(Page, ListPageMixin):
     def _lay(self, *a):
         hh = dp(64)
         self.header.size = (self.width, hh)
-        self.header.pos = (self.x, self.top - hh)
+        self.header.pos = (self.x, (self.y + self.height) - hh)
         self.vlist.pos = self.pos
-        self.vlist.size = (self.width, max(0, self.top - hh - self.y))
+        self.vlist.size = (self.width, max(0, (self.y + self.height) - hh - self.y))
         self.fab.pos = (self.x + dp(18), self.y + dp(20))
         if hasattr(self, 'fab_icon'):
-            self.fab_icon.center = self.fab.center
+            self.fab_icon.center = (self.fab.x + self.fab.width / 2.0, self.fab.y + self.fab.height / 2.0)
         self.fab.canvas.before.clear()
         with self.fab.canvas.before:
             Color(*ACCENT)
@@ -1441,9 +1465,9 @@ class PickerPage(Page, ListPageMixin):
     def _lay(self, *a):
         hh = dp(60)
         self.header.size = (self.width, hh)
-        self.header.pos = (self.x, self.top - hh)
+        self.header.pos = (self.x, (self.y + self.height) - hh)
         self.vlist.pos = self.pos
-        self.vlist.size = (self.width, max(0, self.top - hh - self.y))
+        self.vlist.size = (self.width, max(0, (self.y + self.height) - hh - self.y))
 
     def refresh(self):
         lib = self.app.lib

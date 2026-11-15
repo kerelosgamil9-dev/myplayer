@@ -239,8 +239,8 @@ class Icon(Widget):
         if not ops or self.width < 2:
             return
         u = min(self.width, self.height) / 24.0
-        ox = self.center_x - 12 * u
-        oy = self.center_y - 12 * u
+        ox = (self.x + self.width / 2.0) - 12 * u
+        oy = (self.y + self.height / 2.0) - 12 * u
 
         def P(x, y):
             return ox + x * u, oy + (24 - y) * u
@@ -360,7 +360,7 @@ class IconButton(Tap):
         self._sync()
 
     def _sync(self, *a):
-        self.icon.center = self.center
+        self.icon.center = (self.x + self.width / 2.0, self.y + self.height / 2.0)
 
     def set_icon(self, name):
         self.icon.name = name
@@ -406,8 +406,8 @@ class PillSwitch(Tap):
             RoundedRectangle(pos=self.pos, size=self.size, radius=[h / 2.0])
             Color(1, 1, 1, 1)
             r = h * 0.38
-            cx = self.right - h / 2.0 if self.value else self.x + h / 2.0
-            Ellipse(pos=(cx - r, self.center_y - r), size=(2 * r, 2 * r))
+            cx = (self.x + self.width) - h / 2.0 if self.value else self.x + h / 2.0
+            Ellipse(pos=(cx - r, (self.y + self.height / 2.0) - r), size=(2 * r, 2 * r))
 
 
 class Chip(Tap):
@@ -474,22 +474,21 @@ class Thumb(Widget):
         if self.width < 2:
             return
         with self.canvas:
-            Color(0.13, 0.13, 0.14, 1)
+            Color(0.03, 0.03, 0.035, 1)
             RoundedRectangle(pos=self.pos, size=self.size, radius=[self.radius])
             tex = self._tex
             if tex is not None:
                 tw, th = tex.size
                 if tw > 0 and th > 0:
-                    target = self.width / float(self.height)
-                    src = tw / float(th)
-                    if src > target:
-                        nw = th * target
-                        reg = tex.get_region((tw - nw) / 2.0, 0, nw, th)
-                    else:
-                        nh = tw / target
-                        reg = tex.get_region(0, (th - nh) / 2.0, tw, nh)
+                    # "contain": the whole picture, black bars at the sides for tall videos
+                    k = min(self.width / float(tw), self.height / float(th))
+                    dw, dh = tw * k, th * k
                     Color(1, 1, 1, 1)
-                    RoundedRectangle(pos=self.pos, size=self.size, radius=[self.radius], texture=reg)
+                    if dw >= self.width - 1 and dh >= self.height - 1:
+                        RoundedRectangle(pos=self.pos, size=self.size, radius=[self.radius], texture=tex)
+                    else:
+                        Rectangle(pos=(self.x + (self.width - dw) / 2.0, self.y + (self.height - dh) / 2.0),
+                                  size=(dw, dh), texture=tex)
 
 
 # ---------------------------------------------------------------------------
@@ -517,7 +516,7 @@ class SeekBar(Widget):
         pad = dp(10)
         w = max(1.0, self.width - 2 * pad)
         th = dp(3.5) if not self.dragging else dp(5)
-        y = self.center_y - th / 2.0
+        y = (self.y + self.height / 2.0) - th / 2.0
         v = max(0.0, min(1.0, self.value))
         with self.canvas:
             Color(1, 1, 1, 0.28)
@@ -526,7 +525,7 @@ class SeekBar(Widget):
             RoundedRectangle(pos=(self.x + pad, y), size=(max(th, w * v), th), radius=[th / 2.0])
             r = dp(8) if not self.dragging else dp(11)
             Color(*ACCENT)
-            Ellipse(pos=(self.x + pad + w * v - r, self.center_y - r), size=(2 * r, 2 * r))
+            Ellipse(pos=(self.x + pad + w * v - r, (self.y + self.height / 2.0) - r), size=(2 * r, 2 * r))
 
     def on_touch_down(self, touch):
         if self.disabled or not self.collide_point(*touch.pos):
@@ -648,12 +647,12 @@ class FieldInput(FloatLayout):
         w = self.shown.text_width() if txt else 0
         rtl = textfix.is_rtl(txt) if txt else True
         if rtl:
-            x = self.right - pad - w - dp(2)
+            x = (self.x + self.width) - pad - w - dp(2)
         else:
             x = self.x + pad + w + dp(1)
         with self.canvas.after:
             Color(*ACCENT)
-            Rectangle(pos=(x, self.center_y - dp(11)), size=(dp(2), dp(22)))
+            Rectangle(pos=(x, (self.y + self.height / 2.0) - dp(11)), size=(dp(2), dp(22)))
 
 
 # ---------------------------------------------------------------------------
@@ -796,7 +795,7 @@ class VList(StencilView):
             if row.width != self.width or row.height != rh:
                 row.size = (self.width, rh)
             slot = self._slot(i)
-            row.ty = self.top - (slot + 1) * rh + self.scroll
+            row.ty = (self.y + self.height) - (slot + 1) * rh + self.scroll
             if self._drag and i == self._drag['from']:
                 row.pos = (self.x, self._drag['y'])
             elif self._drag:
@@ -810,7 +809,7 @@ class VList(StencilView):
 
     # ---- touch -------------------------------------------------------------
     def index_at(self, y):
-        i = int((self.scroll + (self.top - y)) // self.row_h)
+        i = int((self.scroll + ((self.y + self.height) - y)) // self.row_h)
         return i if 0 <= i < len(self.items) else None
 
     def on_touch_down(self, touch):
@@ -963,9 +962,9 @@ class VList(StencilView):
         d = self._drag
         rh = self.row_h
         y = d['touch_y']
-        d['y'] = max(self.y - rh * 0.5, min(self.top - rh * 0.5, y - d['off']))
+        d['y'] = max(self.y - rh * 0.5, min((self.y + self.height) - rh * 0.5, y - d['off']))
         center = d['y'] + rh / 2.0
-        to = int((self.scroll + (self.top - center)) // rh)
+        to = int((self.scroll + ((self.y + self.height) - center)) // rh)
         d['to'] = max(0, min(len(self.items) - 1, to))
 
     def _drag_tick(self, dt):
@@ -975,8 +974,8 @@ class VList(StencilView):
         # auto scroll near the edges
         edge = dp(70)
         ty = d['touch_y']
-        if ty > self.top - edge:
-            self.scroll -= dp(9) * (1 + (ty - (self.top - edge)) / edge)
+        if ty > (self.y + self.height) - edge:
+            self.scroll -= dp(9) * (1 + (ty - ((self.y + self.height) - edge)) / edge)
         elif ty < self.y + edge:
             self.scroll += dp(9) * (1 + ((self.y + edge) - ty) / edge)
         self.scroll = max(0.0, min(self.scroll, self.max_scroll()))
@@ -1092,13 +1091,13 @@ class SheetRow(Tap):
 
     def _lay(self, *a):
         pad = dp(18)
-        right = self.right - pad
+        right = (self.x + self.width) - pad
         if self.icon is not None:
-            self.icon.center = (right - dp(11), self.center_y)
+            self.icon.center = (right - dp(11), (self.y + self.height / 2.0))
             right -= dp(40)
         left = self.x + pad
         if self.chk is not None:
-            self.chk.center = (left + dp(11), self.center_y)
+            self.chk.center = (left + dp(11), (self.y + self.height / 2.0))
             left += dp(36)
         vw = dp(120) if self.val.ltext else 0
         self.val.pos = (left, self.y)
@@ -1163,8 +1162,8 @@ class ChipsRow(Widget):
         for i, c in enumerate(self.chips):
             r, col = divmod(i, self.cols)
             # RTL: first chip on the right
-            x = self.right - pad - (col + 1) * cw - col * gap
-            y = self.top - dp(4) - (r + 1) * dp(40) - r * dp(8)
+            x = (self.x + self.width) - pad - (col + 1) * cw - col * gap
+            y = (self.y + self.height) - dp(4) - (r + 1) * dp(40) - r * dp(8)
             c.pos = (x, y)
             c.size = (cw, dp(40))
 
@@ -1207,12 +1206,12 @@ class MenuSheet(Overlay):
             pw = min(dp(420), W * 0.55)
             ph = H
             self.panel.radius = [dp(20), 0, 0, dp(20)]
-            self.panel.pos = (self.right - pw, self.y)
+            self.panel.pos = ((self.x + self.width) - pw, self.y)
         else:
             pw = min(W, dp(520))
             ph = min(self.content_h + dp(8), H * 0.82)
             self.panel.radius = [dp(22), dp(22), 0, 0]
-            self.panel.pos = (self.center_x - pw / 2.0, self.y)
+            self.panel.pos = ((self.x + self.width / 2.0) - pw / 2.0, self.y)
         self.panel._bg.radius = self.panel.radius
         self.panel.size = (pw, ph)
         self.sv.pos = self.panel.pos
@@ -1267,12 +1266,12 @@ class Dialog(Overlay):
         mh = msg_lines * sp(15) * 1.5 if self.msg.ltext else 0
         eh = (self.extra.height + dp(10)) if self.extra is not None else 0
         ph = pad + dp(32) + dp(8) + mh + eh + dp(14) + dp(46) + dp(10)
-        px = self.center_x - pw / 2.0
+        px = (self.x + self.width / 2.0) - pw / 2.0
         if self.extra is not None:
-            py = self.top - dp(120) - ph       # keep clear of the keyboard
+            py = (self.y + self.height) - dp(120) - ph       # keep clear of the keyboard
             py = max(self.y + dp(8), py)
         else:
-            py = self.center_y - ph / 2.0
+            py = (self.y + self.height / 2.0) - ph / 2.0
         self.panel.pos = (px, py)
         self.panel.size = (pw, ph)
         y = py + ph - pad - dp(32)

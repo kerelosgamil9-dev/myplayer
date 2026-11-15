@@ -46,10 +46,42 @@ def init_crumbs(app):
         crumb_reset()
         crumb('start')
         if prev and not prev.endswith(('clean-exit', 'paused')):
-            return prev[-600:]
+            last = prev.strip().split('\n')[-1]
+            note = ''
+            if last.startswith(('engine: open', 'player: load', 'engine: get_frame')):
+                note = '\n\n>> switching playback mode to level %d' % bump_engine_level()
+            return prev[-600:] + note
     except Exception:
         pass
     return ''
+
+
+def _level_path():
+    p = _CRUMB.get('path')
+    return os.path.join(os.path.dirname(p), 'engine_level.txt') if p else None
+
+
+def engine_level():
+    p = _level_path()
+    try:
+        with open(p) as f:
+            return int(f.read().strip() or 0) % 4
+    except Exception:
+        return 0
+
+
+def bump_engine_level():
+    """Previous run died while opening a video: try the next, safer playback mode."""
+    p = _level_path()
+    if not p:
+        return 0
+    n = (engine_level() + 1) % 4
+    try:
+        with open(p, 'w') as f:
+            f.write(str(n))
+    except Exception:
+        pass
+    return n
 
 
 def crumb(msg):
