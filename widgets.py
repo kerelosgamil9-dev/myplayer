@@ -349,15 +349,25 @@ class Tap(Widget):
 
 
 class IconButton(Tap):
-    def __init__(self, icon='play', callback=None, color=None, icon_size=None, **kw):
+    def __init__(self, icon='play', callback=None, color=None, icon_size=None, bg=None, **kw):
         kw.setdefault('size_hint', (None, None))
         kw.setdefault('size', (dp(48), dp(48)))
         super(IconButton, self).__init__(callback=callback, **kw)
+        self.bg = bg
+        self.bind(pos=self._draw_bg, size=self._draw_bg)
         isz = icon_size or dp(24)
         self.icon = Icon(name=icon, size=(isz, isz), color=list(color or TEXT))
         self.add_widget(self.icon)
         self.bind(pos=self._sync, size=self._sync)
         self._sync()
+
+    def _draw_bg(self, *a):
+        self.canvas.before.clear()
+        if self.bg:
+            d = min(self.width, self.height)
+            with self.canvas.before:
+                Color(*self.bg)
+                Ellipse(pos=(self.x + (self.width - d) / 2.0, self.y + (self.height - d) / 2.0), size=(d, d))
 
     def _sync(self, *a):
         self.icon.center = (self.x + self.width / 2.0, self.y + self.height / 2.0)

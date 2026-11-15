@@ -655,7 +655,6 @@ class SettingsPane(FloatLayout):
                            ('autoplay_next', 'تشغيل الفيديو التالي تلقائياً'),
                            ('gestures', 'إيماءات السحب (تقديم / سطوع / صوت)'),
                            ('keep_awake', 'إبقاء الشاشة مضاءة أثناء التشغيل'),
-                           ('auto_rotate', 'تدوير الشاشة تلقائياً حسب الفيديو'),
                            ('sub_on', 'تشغيل الترجمة تلقائياً إن وجدت'),
                            ('vibrate', 'اهتزاز عند التحديد')):
             box.add_widget(SwitchRow(label, bool(self.S(key)), lambda v, k=key: self.put(k, v)))

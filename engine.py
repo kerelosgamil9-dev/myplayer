@@ -106,10 +106,11 @@ class VideoEngine(object):
                 break
             except Exception as ex:
                 traceback.print_exc()
-                errs.append('L%d: %s' % (level, ex))
+                tb = ' / '.join(traceback.format_exc().strip().splitlines()[-4:])
+                errs.append('L%d: %s [%s] opts=%r seek_err=%s' % (level, ex, tb, o, self.last_seek_error))
                 bridge.crumb('engine: failed L%d %s' % (level, ex))
                 self.player = None
-                bridge.bump_engine_level()
+                break
         if self.player is None:
             if self.on_error:
                 self.on_error('\n'.join(errs))
@@ -173,18 +174,23 @@ class VideoEngine(object):
         p = self.player
         if p is None:
             return False
-        for kw in ({'relative': False, 'accurate': accurate}, {'relative': False}):
+        errs = []
+        delta = (t - self.position) / max(self.speed, 0.01)
+        tries = (
+            ('abs', lambda: p.seek(t, relative=False, accurate=accurate)),
+            ('abs2', lambda: p.seek(t, relative=False, seek_by_bytes=False, accurate=accurate)),
+            ('rel', lambda: p.seek(delta, relative=True, accurate=accurate)),
+            ('pos', lambda: p.seek(t, False)),
+        )
+        for name, fn in tries:
             try:
-                p.seek(t, **kw)
+                fn()
                 return True
             except Exception as ex:
-                self.last_seek_error = str(ex)
-        try:
-            p.seek(t, False)
-            return True
-        except Exception as ex:
-            self.last_seek_error = str(ex)
-            return False
+                errs.append('%s: %s' % (name, ex))
+        self.last_seek_error = ' | '.join(errs)
+        bridge.crumb('seek failed: ' + self.last_seek_error)
+        return False
 
     # ---- controls -----------------------------------------------------------------
     def set_pause(self, paused):
