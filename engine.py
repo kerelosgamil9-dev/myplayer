@@ -132,7 +132,11 @@ class VideoEngine(object):
         for o in variants():
             bridge.crumb('engine: open L%d %s speed=%s' % (level, self.path, self.speed))
             try:
-                self.player = MediaPlayer(self.path, thread_lib=thread_lib, loglevel='error', ff_opts=o)
+                try:
+                    self.player = MediaPlayer(self.path, thread_lib=thread_lib, loglevel='error', ff_opts=o,
+                                              lib_opts={'threads': 'auto'})     # multi-threaded decoding
+                except TypeError:
+                    self.player = MediaPlayer(self.path, thread_lib=thread_lib, loglevel='error', ff_opts=o)
                 self._vf_on = 'vf' in o
                 break
             except Exception as ex:
@@ -365,6 +369,12 @@ class VideoEngine(object):
             w, h = img.get_size()
         except Exception:
             return
+        if not self.ready and max(w, h) > 1280:
+            k = 1280.0 / max(w, h)             # decode/convert at most 1280 px: much faster on phones
+            try:
+                p.set_size(int(w * k) // 2 * 2, int(h * k) // 2 * 2)
+            except Exception:
+                pass
         if self.texture is None or self.texture.size != (w, h):
             self.texture = Texture.create(size=(w, h), colorfmt='rgba')
             self.texture.flip_vertical()
@@ -389,11 +399,11 @@ class VideoEngine(object):
                     self._anchor_pts = None
                     self._last_pts = None
         elif self.audio is not None and not self.paused and self._last_pts is not None \
-                and now - self._seek_time > 1.2 and now - self._last_sync > (0.5 if self.speed > 1.05 else 1.0):
+                and now - self._seek_time > 1.2 and now - self._last_sync > (0.7 if self.speed > 1.05 else 1.5):
             self._last_sync = now
             ap = self.audio.position()
             vm = self._last_pts
-            limit = 0.45 if self.speed > 1.05 else 0.6
+            limit = 0.8 if self.speed > 1.05 else 0.9
             if ap is not None and abs(ap - vm) > limit and not self.eof:
                 lead = 0.1 * self.speed
                 if self._do_seek(min(ap + lead, (self.duration or 1e9) - 0.3), True):

@@ -134,6 +134,7 @@ class PlayerPage(Page):
         self._last_save = 0
         self._brightness = None
         self._ended = False
+        self._last_up = 0.0
         self.engine = VideoEngine(on_frame=self._on_frame, on_eof=self._on_eof, on_error=self._on_error)
 
         with self.canvas.before:
@@ -182,6 +183,7 @@ class PlayerPage(Page):
         self.bind(pos=self._lay, size=self._lay)
         self._lay()
         self._ui_ev = Clock.schedule_interval(self._ui_tick, 0.1)
+        self._wd_ev = Clock.schedule_interval(self._hold_watchdog, 0.25)
 
     # ------------------------------------------------------------------ lifecycle
     def on_show(self):
@@ -201,6 +203,7 @@ class PlayerPage(Page):
         self.save_progress(force=True)
         try:
             self._ui_ev.cancel()
+            self._wd_ev.cancel()
         except Exception:
             pass
         self.engine.close()
@@ -573,11 +576,35 @@ class PlayerPage(Page):
             if self.ctl.on_touch_down(touch):
                 return True
         touch.grab(self)
-        self.g = {'uid': touch.uid, 'sx': touch.x, 'sy': touch.y, 'mode': None, 'time': time.time(),
+        now = time.time()
+        self._release_hold()                       # never leave a previous hold running
+        self.g = {'uid': touch.uid, 'sx': touch.x, 'sy': touch.y, 'mode': None, 'time': now,
                   'moved': False}
-        if not self.locked:
+        # no hold-to-speed while the user is tapping quickly (double-tap skips)
+        if not self.locked and now - self._last_up > 0.45:
             self.g['ev'] = Clock.schedule_once(self._hold_start, 0.4)
         return True
+
+    def _release_hold(self):
+        if self.hold_active:
+            self.hold_active = False
+            self.hold_pill.hide()
+            self.engine.set_speed(self.speed)
+            self._sync_speed_tag()
+
+    def _hold_watchdog(self, dt):
+        """If the finger is gone but the 2x is still running (lost touch-up), stop it."""
+        if not self.hold_active:
+            return
+        try:
+            from kivy.base import EventLoop
+            alive = [t.uid for t in EventLoop.touches]
+        except Exception:
+            return
+        g = self.g
+        if not g or g['uid'] not in alive:
+            self.g = None
+            self._release_hold()
 
     def _hold_start(self, dt):
         g = self.g
@@ -643,7 +670,10 @@ class PlayerPage(Page):
 
     def on_touch_up(self, touch):
         g = self.g
+        if g and g['uid'] == touch.uid and touch.grab_current is not self:
+            self._last_up = time.time()
         if touch.grab_current is self and g and g['uid'] == touch.uid:
+            self._last_up = time.time()
             touch.ungrab(self)
             self.g = None
             ev = g.get('ev')
