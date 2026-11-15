@@ -91,13 +91,15 @@ class VideoEngine(object):
         native = bridge.engine_level() >= 2
         if native:
             opts['an'] = True               # audio is played by Android's MediaPlayer
-        else:
+        else:                               # desktop fallback: ffpyplayer plays audio itself
             af = core.atempo_chain(self.speed)
             if af:
                 opts['af'] = af
-        vf = core.setpts_filter(self.speed)
-        if vf:
-            opts['vf'] = vf
+            vf = core.setpts_filter(self.speed)
+            if vf:
+                opts['vf'] = vf
+        # On Android no speed filters on the video: with a filter, frames freeze after any seek.
+        # The video runs at its normal rate and is re-synced to the audio clock instead.
         errs = []
         self.player = None
         level = bridge.engine_level()
@@ -273,14 +275,13 @@ class VideoEngine(object):
         speed = float(speed)
         if abs(speed - self.speed) < 1e-6:
             return
-        if not self.path:
-            self.speed = speed
-            return
         pos = self.position
         self.speed = speed
+        self._last_sync = 0.0
         if self.audio is not None:
             self.audio.set_speed(speed)
-        self._start_player(pos)
+        elif self.player is not None and self.path:
+            self._start_player(pos)                 # desktop fallback: reopen with filters
 
     def set_volume(self, v):
         self._volume = max(0.0, min(1.0, float(v)))
@@ -388,13 +389,15 @@ class VideoEngine(object):
                     self._anchor_pts = None
                     self._last_pts = None
         elif self.audio is not None and not self.paused and self._last_pts is not None \
-                and now - self._seek_time > 1.5 and now - self._last_sync > 1.0:
+                and now - self._seek_time > 1.2 and now - self._last_sync > (0.5 if self.speed > 1.05 else 1.0):
             self._last_sync = now
             ap = self.audio.position()
-            vm = self._last_pts * (self.speed if self._vf_on else 1.0)
-            if ap is not None and abs(ap - vm) > 0.5 and not self.eof:
-                if self._do_seek(ap, False):
-                    self._seek_time = now
+            vm = self._last_pts
+            limit = 0.45 if self.speed > 1.05 else 0.6
+            if ap is not None and abs(ap - vm) > limit and not self.eof:
+                lead = 0.1 * self.speed
+                if self._do_seek(min(ap + lead, (self.duration or 1e9) - 0.3), True):
+                    self._seek_time = now - 0.7      # short settle time before the next check
                     self._seek_target = ap
                     self._anchor_media = ap
                     self._anchor_pts = None
