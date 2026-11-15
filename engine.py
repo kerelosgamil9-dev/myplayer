@@ -54,6 +54,10 @@ class VideoEngine(object):
         self._volume = 1.0
         self._meta_done = False
         self._closing = False
+        self.audio = None
+        self._seek_after = None
+        self._last_sync = 0.0
+        self.last_seek_error = ''
 
     # ---- lifecycle -----------------------------------------------------------
     def open(self, path, start=0.0, speed=1.0, paused=False, duration_hint=0.0):
@@ -71,6 +75,7 @@ class VideoEngine(object):
         if duration_hint:
             self.duration = float(duration_hint)
         self._start_player(max(0.0, float(start)))
+        self._audio_open(max(0.0, float(start)))
         if self._ev is None:
             self._ev = Clock.schedule_interval(self._tick, 1.0 / 60.0)
         return self.player is not None
@@ -79,22 +84,22 @@ class VideoEngine(object):
         if self.player is not None:
             self._close_player()
         opts = {'paused': self.paused, 'out_fmt': 'rgba', 'volume': self._volume}
-        af = core.atempo_chain(self.speed)
+        native = bridge.engine_level() >= 2
+        if native:
+            opts['an'] = True               # audio is played by Android's MediaPlayer
+        else:
+            af = core.atempo_chain(self.speed)
+            if af:
+                opts['af'] = af
         vf = core.setpts_filter(self.speed)
-        if af:
-            opts['af'] = af
         if vf:
             opts['vf'] = vf
-        if start > 0.5:
-            opts['ss'] = float(start)
         errs = []
         self.player = None
         for attempt in range(4):
             level = bridge.engine_level()
             o = dict(opts)
             thread_lib = 'threading' if level in (1, 3) else 'SDL'
-            if level in (2, 3):
-                o['an'] = True               # no audio at all (safest mode)
             bridge.crumb('engine: open L%d %s ss=%s speed=%s' % (level, self.path, start, self.speed))
             try:
                 self.player = MediaPlayer(self.path, thread_lib=thread_lib, loglevel='error', ff_opts=o)
@@ -110,6 +115,8 @@ class VideoEngine(object):
                 self.on_error('\n'.join(errs))
             return
         bridge.crumb('engine: opened')
+        self._seek_after = float(start) if start > 0.5 else None
+        self.ready = False
         self._anchor_media = float(start)
         self._anchor_pts = None
         self._last_pts = None
@@ -131,6 +138,9 @@ class VideoEngine(object):
             self._ev.cancel()
             self._ev = None
         self._close_player()
+        if self.audio is not None:
+            self.audio.release()
+            self.audio = None
         self.ready = False
         self.path = None
         if not keep_texture:
@@ -148,9 +158,39 @@ class VideoEngine(object):
             pos = min(pos, self.duration)
         return max(0.0, pos)
 
+    # ---- native audio ----------------------------------------------------------------
+    def _audio_open(self, start):
+        if self.audio is not None:
+            self.audio.release()
+            self.audio = None
+        if bridge.engine_level() < 2 or not bridge.ANDROID:
+            return
+        au = bridge.NativeAudio()
+        if au.open(self.path, start, self.speed, self._volume, self.paused):
+            self.audio = au
+
+    def _do_seek(self, t, accurate=False):
+        p = self.player
+        if p is None:
+            return False
+        for kw in ({'relative': False, 'accurate': accurate}, {'relative': False}):
+            try:
+                p.seek(t, **kw)
+                return True
+            except Exception as ex:
+                self.last_seek_error = str(ex)
+        try:
+            p.seek(t, False)
+            return True
+        except Exception as ex:
+            self.last_seek_error = str(ex)
+            return False
+
     # ---- controls -----------------------------------------------------------------
     def set_pause(self, paused):
         self.paused = bool(paused)
+        if self.audio is not None:
+            self.audio.set_pause(self.paused)
         if self.player is not None:
             try:
                 self.player.set_pause(self.paused)
@@ -168,15 +208,14 @@ class VideoEngine(object):
         if self.duration:
             t = min(t, max(0.0, self.duration - 0.05))
         self.eof = False
-        if self.player is None:
+        if self.audio is not None:
+            self.audio.seek(t)
+            if not self.paused:
+                self.audio.set_pause(False)
+        if self.player is None or not self._do_seek(t, accurate):
             self._start_player(t)
             return
-        try:
-            self.player.seek(t, relative=False, accurate=accurate)
-        except Exception:
-            traceback.print_exc()
-            self._start_player(t)
-            return
+        self._seek_after = None
         self._anchor_media = t
         self._anchor_pts = None          # re-anchored by the next frame
         self._last_pts = None
@@ -194,10 +233,14 @@ class VideoEngine(object):
             return
         pos = self.position
         self.speed = speed
+        if self.audio is not None:
+            self.audio.set_speed(speed)
         self._start_player(pos)
 
     def set_volume(self, v):
         self._volume = max(0.0, min(1.0, float(v)))
+        if self.audio is not None:
+            self.audio.set_volume(self._volume)
         if self.player is not None:
             try:
                 self.player.set_volume(self._volume)
@@ -205,6 +248,8 @@ class VideoEngine(object):
                 pass
 
     def cycle_audio(self):
+        if self.audio is not None:
+            return self.audio.cycle_track()
         if self.player is None:
             return False
         try:
@@ -252,6 +297,8 @@ class VideoEngine(object):
         if val == 'eof':
             if not self.eof:
                 self.eof = True
+                if self.audio is not None:
+                    self.audio.set_pause(True)
                 if self.duration:
                     self._anchor_media = self.duration
                     self._anchor_pts = self._last_pts = 0.0
@@ -289,5 +336,20 @@ class VideoEngine(object):
         if not self.ready:
             self.ready = True
             self._read_meta()
+            if self._seek_after is not None:
+                t, self._seek_after = self._seek_after, None
+                if self._do_seek(t, False):
+                    self._anchor_media = t
+                    self._anchor_pts = None
+                    self._last_pts = None
+        elif self.audio is not None and not self.paused and self._anchor_pts is not None:
+            if now - self._last_sync > 1.0:
+                self._last_sync = now
+                ap = self.audio.position()
+                if ap is not None and abs(ap - self.position) > 0.35 and not self.eof:
+                    if self._do_seek(ap, False):
+                        self._anchor_media = ap
+                        self._anchor_pts = None
+                        self._last_pts = None
         if self.on_frame:
             self.on_frame(self.texture)

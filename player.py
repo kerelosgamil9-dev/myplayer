@@ -122,7 +122,8 @@ class PlayerPage(Page):
         self.btn_more = IconButton('dots', callback=lambda w: self.main_menu())
         self.cur = Txt(font_size=sp(13), halign='left', size_hint=(None, None))
         self.dur = Txt(font_size=sp(13), halign='right', size_hint=(None, None))
-        self.seek = SeekBar(on_start=self._seek_start, on_move=self._seek_move, on_end=self._seek_end)
+        self.seek = SeekBar(on_start=self._seek_start, on_move=self._seek_move, on_end=self._seek_end,
+                            size_hint=(None, None), size=(dp(100), dp(36)))
         self.btn_lock = IconButton('unlock', callback=lambda w: self.set_lock(True))
         self.btn_prev = IconButton('prev', callback=lambda w: self.prev())
         self.btn_rew = IconButton('rew', callback=lambda w: self.skip(-self._step()))
@@ -490,11 +491,19 @@ class PlayerPage(Page):
         bot_h = dp(128)
         # translucent bars
         self.ctl.canvas.before.clear()
+        if not hasattr(self, '_grad'):
+            from kivy.graphics.texture import Texture
+            t = Texture.create(size=(1, 2), colorfmt='rgba')
+            t.blit_buffer(bytes([0, 0, 0, 0, 0, 0, 0, 215]), colorfmt='rgba', bufferfmt='ubyte')
+            t.mag_filter = 'linear'
+            self._grad = t
         with self.ctl.canvas.before:
-            Color(0, 0, 0, 0.5)
-            Rectangle(pos=(x0, y0 + H - top_h), size=(W, top_h))
-            Color(0, 0, 0, 0.55)
-            Rectangle(pos=(x0, y0), size=(W, bot_h))
+            Color(1, 1, 1, 1)
+            # bottom bar: transparent at its top edge, dark at the bottom
+            Rectangle(pos=(x0, y0), size=(W, bot_h + dp(30)), texture=self._grad,
+                      tex_coords=(0, 1, 1, 1, 1, 0, 0, 0))
+            # top bar: dark at the top edge
+            Rectangle(pos=(x0, y0 + H - top_h - dp(20)), size=(W, top_h + dp(20)), texture=self._grad)
         top = y0 + H - top_h
         self.btn_back.pos = (x0 + W - pad - dp(48), top + dp(6))
         left = x0 + pad

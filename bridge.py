@@ -58,24 +58,28 @@ def init_crumbs(app):
 
 def _level_path():
     p = _CRUMB.get('path')
-    return os.path.join(os.path.dirname(p), 'engine_level.txt') if p else None
+    return os.path.join(os.path.dirname(p), 'engine_mode.txt') if p else None
 
 
 def engine_level():
+    """Android: 2 = video by ffpyplayer + audio by Android MediaPlayer, 3 = same with
+    python threads. (ffpyplayer's own audio crashes on some devices.) PC: 0."""
+    if not ANDROID:
+        return 0
     p = _level_path()
     try:
         with open(p) as f:
-            return int(f.read().strip() or 0) % 4
+            return 3 if int(f.read().strip() or 2) == 3 else 2
     except Exception:
-        return 0
+        return 2
 
 
 def bump_engine_level():
-    """Previous run died while opening a video: try the next, safer playback mode."""
+    """Previous run died while opening a video: try the other mode."""
     p = _level_path()
-    if not p:
-        return 0
-    n = (engine_level() + 1) % 4
+    if not p or not ANDROID:
+        return engine_level()
+    n = 2 if engine_level() == 3 else 3
     try:
         with open(p, 'w') as f:
             f.write(str(n))
@@ -641,3 +645,128 @@ def vibrate(ms=25):
 def screen_density_scale():
     """Not used for layout (kivy.metrics.dp does that) - handy for debugging."""
     return 1.0
+
+
+
+# ---------------------------------------------------------------------------
+# audio through Android's own MediaPlayer (hardware decoder, speed with pitch kept)
+# ---------------------------------------------------------------------------
+class NativeAudio(object):
+    def __init__(self):
+        self.mp = None
+        self.paused = False
+        self.speed = 1.0
+        self.error = ''
+
+    @property
+    def ok(self):
+        return self.mp is not None
+
+    def open(self, path, start=0.0, speed=1.0, volume=1.0, paused=False):
+        self.release()
+        self.paused = bool(paused)
+        self.speed = float(speed)
+        try:
+            MP = autoclass('android.media.MediaPlayer')
+            mp = MP()
+            mp.setDataSource(path)
+            mp.prepare()
+            self.mp = mp
+            if start > 0.3:
+                self._seek_ms(int(start * 1000))
+            mp.setVolume(float(volume), float(volume))
+            self._apply_speed()
+            if not self.paused:
+                mp.start()
+            crumb('audio: started')
+            return True
+        except Exception as e:
+            self.error = str(e)
+            crumb('audio: failed %s' % e)
+            self.release()
+            return False
+
+    def _apply_speed(self):
+        if self.mp is None:
+            return
+        try:
+            PP = autoclass('android.media.PlaybackParams')
+            pp = PP()
+            pp.setSpeed(float(self.speed))
+            pp.setPitch(1.0)
+            self.mp.setPlaybackParams(pp)
+            if self.paused and self.mp.isPlaying():
+                self.mp.pause()
+        except Exception as e:
+            crumb('audio: speed failed %s' % e)
+
+    def _seek_ms(self, ms):
+        try:
+            self.mp.seekTo(int(ms), 3)          # SEEK_CLOSEST (API 26+)
+        except Exception:
+            try:
+                self.mp.seekTo(int(ms))
+            except Exception:
+                pass
+
+    def set_speed(self, s):
+        self.speed = float(s)
+        self._apply_speed()
+
+    def set_pause(self, paused):
+        self.paused = bool(paused)
+        if self.mp is None:
+            return
+        try:
+            if self.paused:
+                self.mp.pause()
+            else:
+                self.mp.start()
+        except Exception:
+            pass
+
+    def seek(self, t):
+        if self.mp is not None:
+            self._seek_ms(int(max(0.0, t) * 1000))
+
+    def position(self):
+        if self.mp is None:
+            return None
+        try:
+            return self.mp.getCurrentPosition() / 1000.0
+        except Exception:
+            return None
+
+    def set_volume(self, v):
+        if self.mp is not None:
+            try:
+                self.mp.setVolume(float(v), float(v))
+            except Exception:
+                pass
+
+    def cycle_track(self):
+        if self.mp is None:
+            return False
+        try:
+            infos = self.mp.getTrackInfo()
+            audio = [i for i in range(len(infos)) if infos[i].getTrackType() == 2]
+            if len(audio) < 2:
+                return False
+            cur = self.mp.getSelectedTrack(2)
+            nxt = audio[(audio.index(cur) + 1) % len(audio)] if cur in audio else audio[0]
+            self.mp.selectTrack(nxt)
+            return True
+        except Exception as e:
+            crumb('audio: track failed %s' % e)
+            return False
+
+    def pause_now(self):
+        self.set_pause(True)
+
+    def release(self):
+        mp, self.mp = self.mp, None
+        if mp is not None:
+            try:
+                mp.release()
+            except Exception:
+                pass
