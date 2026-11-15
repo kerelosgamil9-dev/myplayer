@@ -302,7 +302,10 @@ class PlayerPage(Page):
     def _on_frame(self, tex):
         if self._vrect.texture is not tex:
             self._vrect.texture = tex
-        self._place_video()
+        key = (tuple(self.engine.size), tuple(self.size), self.aspect)
+        if key != getattr(self, '_place_key', None):
+            self._place_key = key
+            self._place_video()
 
     def _on_eof(self):
         if self._closed:
@@ -446,8 +449,14 @@ class PlayerPage(Page):
         if not self.seeking:
             if e.duration:
                 self.seek.value = max(0.0, min(1.0, pos / e.duration))
-            self.cur.ltext = core.fmt_time(pos)
-        self.dur.ltext = core.fmt_time(e.duration) if e.duration else '--:--'
+            t = core.fmt_time(pos)
+            if t != getattr(self, '_cur_txt', None):
+                self._cur_txt = t
+                self.cur.ltext = t
+        d = core.fmt_time(e.duration) if e.duration else '--:--'
+        if d != getattr(self, '_dur_txt', None):
+            self._dur_txt = d
+            self.dur.ltext = d
         # subtitles
         txt = ''
         if self.sub_track is not None and self.store.setting('sub_on'):

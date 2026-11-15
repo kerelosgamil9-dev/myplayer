@@ -87,6 +87,7 @@ class HWEngine(object):
         self._next_slow = 0.0
         self._failed = False
         self._fbo_size = None
+        self._matrix = None
 
     # ---- lifecycle ------------------------------------------------------------
     def open(self, path, start=0.0, speed=1.0, paused=False, duration_hint=0.0):
@@ -200,6 +201,11 @@ class HWEngine(object):
         self.fbo = fbo
         self._fbo_size = (w, h)
         self.texture = fbo.texture
+        try:
+            self.texture.flip_vertical()    # GL output is bottom-up; show it upright
+        except Exception as ex:
+            bridge.crumb('hw: flip failed %s' % ex)
+        self._matrix = None
         self._set_matrix(_DEFAULT_MATRIX)
         self._first_frame_time = 0.0
         self._pix_checks = [0.4, 1.2, 2.5]
@@ -214,14 +220,16 @@ class HWEngine(object):
     def _update_frame(self):
         st = self.st
         st.updateTexImage()
-        flat = [0.0] * 16
-        try:
-            st.getTransformMatrix(flat)
-        except Exception:
-            flat = None
-        if not flat or not any(abs(v) > 1e-6 for v in flat):
-            flat = _DEFAULT_MATRIX
-        self._set_matrix(flat)
+        if self._matrix is None:            # the matrix is constant per video: read it once
+            flat = [0.0] * 16
+            try:
+                st.getTransformMatrix(flat)
+            except Exception:
+                flat = None
+            if not flat or not any(abs(v) > 1e-6 for v in flat):
+                flat = _DEFAULT_MATRIX
+            self._matrix = list(flat)
+            self._set_matrix(self._matrix)
         self.fbo.ask_update()
         self.fbo.draw()
 
