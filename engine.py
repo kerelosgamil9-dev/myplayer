@@ -460,7 +460,12 @@ class Engine(object):
 
     def _hw_failed(self, path, pos, msg):
         bridge.crumb('hw: runtime failure %s' % msg)
-        bridge.disable_hw(msg)
+        if self.hw is not None and self.hw.black_fail:
+            self._black = getattr(self, '_black', 0) + 1
+            if self._black >= 2:
+                bridge.disable_hw(msg)          # black twice in a row: stop trying
+        else:
+            bridge.disable_hw(msg)
         self.impl = self.sw
         if path:
             self.sw.open(path, pos, self._speed, self.sw.paused, self.hw.duration if self.hw else 0.0)

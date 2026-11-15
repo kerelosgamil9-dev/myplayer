@@ -29,11 +29,11 @@ precision highp float;
 #endif
 varying vec4 frag_color;
 varying vec2 tex_coord0;
-uniform samplerExternalOES oes_tex;
+uniform samplerExternalOES texture1;
 uniform mat4 texmat;
 void main() {
     vec2 uv = (texmat * vec4(tex_coord0, 0.0, 1.0)).xy;
-    gl_FragColor = texture2D(oes_tex, uv);
+    gl_FragColor = texture2D(texture1, uv);
 }
 '''
 
@@ -148,6 +148,7 @@ class HWEngine(object):
         return True
 
     last_error = ''
+    black_fail = False
 
     def close(self, keep_texture=False):
         if self._ev is not None:
@@ -183,21 +184,26 @@ class HWEngine(object):
 
     # ---- GL ------------------------------------------------------------------------
     def _make_fbo(self):
-        from kivy.graphics import Callback, ClearBuffers, ClearColor, Fbo, Rectangle
+        from kivy.graphics import BindTexture, ClearBuffers, ClearColor, Fbo, Rectangle
         w, h = self.size
         fbo = Fbo(size=(w, h))
         fbo.shader.fs = _FS
-        oes = self.oes
-
+        ok = getattr(fbo.shader, 'success', True)
+        bridge.crumb('hw: shader ok=%s size=%dx%d' % (ok, w, h))
+        if not ok:
+            raise RuntimeError('video shader failed to compile')
         with fbo:
             ClearColor(0, 0, 0, 1)
             ClearBuffers()
-            Callback(lambda instr: oes.bind(), reset_context=True)
+            BindTexture(texture=self.oes, index=1)
             Rectangle(size=(w, h))
         self.fbo = fbo
         self._fbo_size = (w, h)
         self.texture = fbo.texture
         self._set_matrix(_DEFAULT_MATRIX)
+        self._first_frame_time = 0.0
+        self._pix_checks = [0.4, 1.2, 2.5]
+        self._pix_ok = False
 
     def _set_matrix(self, flat):
         from kivy.graphics.transformation import Matrix
@@ -236,12 +242,23 @@ class HWEngine(object):
                 return
             if not self.ready:
                 self.ready = True
+                self._first_frame_time = now
                 bridge.crumb('hw: first frame')
             if self.on_frame:
                 self.on_frame(self.texture)
         elif not self.ready and not self.paused and now - self._open_time > 4.0:
             self._fail('no video frames from the hardware decoder')
             return
+        if self.ready and not self._pix_ok and self._pix_checks \
+                and now - self._first_frame_time >= self._pix_checks[0]:
+            self._pix_checks.pop(0)
+            if self._picture_visible():
+                self._pix_ok = True
+                bridge.crumb('hw: picture ok')
+            elif not self._pix_checks:
+                bridge.crumb('hw: picture black')
+                self._fail('picture stayed black (GL path)', black=True)
+                return
         if now >= self._next_slow:
             self._next_slow = now + 0.15
             self._check_end(now)
@@ -259,10 +276,19 @@ class HWEngine(object):
             if self.on_eof:
                 self.on_eof()
 
-    def _fail(self, msg):
+    def _picture_visible(self):
+        try:
+            px = self.texture.pixels
+            return any(px[i] > 12 for i in range(0, len(px), 97))
+        except Exception as ex:
+            bridge.crumb('hw: pixel check failed %s' % ex)
+            return True                     # cannot tell: assume fine
+
+    def _fail(self, msg, black=False):
         if self._failed:
             return
         self._failed = True
+        self.black_fail = black
         pos = self.position
         path = self.path
         self.last_error = msg
