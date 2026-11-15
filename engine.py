@@ -29,6 +29,7 @@ except Exception:                       # pragma: no cover - depends on build
 
 
 class VideoEngine(object):
+    _form = 0
     """Owns one ffpyplayer MediaPlayer at a time. All methods are main-thread."""
 
     def __init__(self, on_frame=None, on_eof=None, on_error=None):
@@ -96,21 +97,42 @@ class VideoEngine(object):
             opts['vf'] = vf
         errs = []
         self.player = None
-        for attempt in range(4):
-            level = bridge.engine_level()
-            o = dict(opts)
-            thread_lib = 'threading' if level in (1, 3) else 'SDL'
-            bridge.crumb('engine: open L%d %s ss=%s speed=%s' % (level, self.path, start, self.speed))
+        level = bridge.engine_level()
+        thread_lib = 'threading' if level in (1, 3) else 'SDL'
+
+        def variants():
+            """ffpyplayer wants filter options in a specific form; the one that
+            works is remembered (the exact form differs between versions)."""
+            keys = [k for k in ('vf', 'af') if k in opts]
+            if not keys:
+                yield dict(opts)
+                return
+            forms = [lambda s: s, lambda s: [s], lambda s: [s.encode()], lambda s: s.encode()]
+            order = list(range(len(forms)))
+            first = VideoEngine._form
+            if first in order:
+                order.remove(first)
+                order.insert(0, first)
+            for fi in order:
+                o = dict(opts)
+                for k in keys:
+                    o[k] = forms[fi](opts[k])
+                VideoEngine._form = fi
+                yield o
+            o = dict(opts)                  # last resort: no filters (speed ignored by the video)
+            for k in keys:
+                o.pop(k)
+            yield o
+
+        for o in variants():
+            bridge.crumb('engine: open L%d %s speed=%s' % (level, self.path, self.speed))
             try:
                 self.player = MediaPlayer(self.path, thread_lib=thread_lib, loglevel='error', ff_opts=o)
                 break
             except Exception as ex:
-                traceback.print_exc()
-                tb = ' / '.join(traceback.format_exc().strip().splitlines()[-4:])
-                errs.append('L%d: %s [%s] opts=%r seek_err=%s' % (level, ex, tb, o, self.last_seek_error))
-                bridge.crumb('engine: failed L%d %s' % (level, ex))
+                errs.append('%s opts=%r' % (ex, o))
+                bridge.crumb('engine: failed %s' % ex)
                 self.player = None
-                break
         if self.player is None:
             if self.on_error:
                 self.on_error('\n'.join(errs))

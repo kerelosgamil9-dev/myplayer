@@ -154,22 +154,19 @@ class PlayerPage(Page):
         self.btn_lock = IconButton('unlock', callback=lambda w: self.set_lock(True))
         self.btn_prev = IconButton('prev', callback=lambda w: self.prev())
         self.btn_rew = IconButton('rew', callback=lambda w: self.skip(-self._step()))
-        self.btn_play = IconButton('pause', callback=lambda w: self.toggle_play(), icon_size=dp(40),
-                                   size=(dp(78), dp(78)), bg=(0, 0, 0, 0.5))
+        self.btn_play = IconButton('pause', callback=lambda w: self.toggle_play(), icon_size=dp(38),
+                                   size=(dp(60), dp(60)))
         self.btn_fwd = IconButton('fwd', callback=lambda w: self.skip(self._step()))
         self.btn_next = IconButton('next', callback=lambda w: self.next())
         for b in (self.btn_prev, self.btn_rew, self.btn_fwd, self.btn_next):
-            b.size = (dp(52), dp(52))
-            b.bg = (0, 0, 0, 0.38)
-            b._draw_bg()
+            b.size = (dp(48), dp(48))
             b.icon.size = (dp(26), dp(26))
-        self.btn_speed = SpeedChip(callback=lambda w: self.cycle_speed())
         self.btn_aspect = IconButton('aspect', callback=lambda w: self.cycle_aspect())
         self.btn_unlock = IconButton('lock', color=ACCENT, callback=lambda w: self.set_lock(False),
                                      size=(dp(56), dp(56)))
         for w in (self.btn_back, self.title, self.btn_cc, self.btn_rot, self.btn_more, self.cur, self.dur,
                   self.seek, self.btn_lock, self.btn_prev, self.btn_rew, self.btn_play, self.btn_fwd,
-                  self.btn_next, self.btn_aspect, self.btn_speed):
+                  self.btn_next, self.btn_aspect):
             self.ctl.add_widget(w)
         self.sub_lbl = Txt(font_size=sp(self.store.setting('sub_size')), halign='center', valign='bottom',
                            nlines=2, keep_nl=True, size_hint=(None, None), outline_width=dp(2),
@@ -184,7 +181,6 @@ class PlayerPage(Page):
         self.btn_unlock.opacity = 0
         self.bind(pos=self._lay, size=self._lay)
         self._lay()
-        self.btn_speed.set_speed(core.fmt_speed(self.speed), abs(self.speed - 1.0) > 1e-6)
         self._ui_ev = Clock.schedule_interval(self._ui_tick, 0.1)
 
     # ------------------------------------------------------------------ lifecycle
@@ -371,7 +367,6 @@ class PlayerPage(Page):
         self.show_controls(True)
 
     def _sync_speed_tag(self):
-        self.btn_speed.set_speed(core.fmt_speed(self.speed), abs(self.speed - 1.0) > 1e-6)
         if abs(self.speed - 1.0) > 1e-6 and not self.hold_active:
             self.speed_tag.show(core.fmt_speed(self.speed),
                                 ((self.x + self.width / 2.0), (self.y + self.height) - dp(86)), w=dp(70), h=dp(30))
@@ -531,40 +526,38 @@ class PlayerPage(Page):
             Rectangle(pos=(x0, y0), size=(W, bot_h + dp(30)), texture=self._grad,
                       tex_coords=(0, 1, 1, 1, 1, 0, 0, 0))
             Rectangle(pos=(x0, y0 + H - top_h - dp(20)), size=(W, top_h + dp(20)), texture=self._grad)
-        # top bar: back on the right, title, menu on the left
+        # top bar: back on the right, title, then cc / rotate / menu on the left
         top = y0 + H - top_h
         self.btn_back.pos = (x0 + W - pad - dp(48), top + dp(8))
         self.btn_more.pos = (x0 + pad, top + dp(8))
-        self.title.pos = (x0 + pad + dp(54), top + dp(4))
-        self.title.size = (max(10, self.btn_back.x - (x0 + pad + dp(54)) - dp(8)), top_h - dp(8))
-        # centre transport
-        cy = y0 + H / 2.0
-        big, small = dp(78), dp(52)
-        gap = max(dp(4), min(dp(20), (W - 2 * pad - big - 4 * small) / 4.0))
-        cx = x0 + W / 2.0
-        self.btn_play.pos = (cx - big / 2.0, cy - big / 2.0)
-        self.btn_rew.pos = (cx - big / 2.0 - gap - small, cy - small / 2.0)
-        self.btn_prev.pos = (self.btn_rew.x - gap - small, cy - small / 2.0)
-        self.btn_fwd.pos = (cx + big / 2.0 + gap, cy - small / 2.0)
-        self.btn_next.pos = (self.btn_fwd.x + small + gap, cy - small / 2.0)
+        self.btn_rot.pos = (self.btn_more.x + dp(46), top + dp(8))
+        self.btn_cc.pos = (self.btn_rot.x + dp(46), top + dp(8))
+        tl = self.btn_cc.x + dp(48)
+        self.title.pos = (tl, top + dp(4))
+        self.title.size = (max(10, self.btn_back.x - tl - dp(6)), top_h - dp(8))
         # seek row
-        sy = y0 + dp(62)
+        sy = y0 + dp(66)
         self.cur.pos = (x0 + pad + dp(4), sy)
         self.cur.size = (dp(54), dp(36))
         self.dur.pos = (x0 + W - pad - dp(58), sy)
         self.dur.size = (dp(54), dp(36))
         self.seek.pos = (x0 + pad + dp(54), sy)
         self.seek.size = (max(10, W - 2 * pad - dp(108)), dp(36))
-        # tools row
-        ry = y0 + dp(10)
-        self.btn_lock.pos = (x0 + pad, ry)
-        self.btn_speed.pos = (x0 + pad + dp(54), ry + dp(7))
-        self.btn_aspect.pos = (x0 + W - pad - dp(48), ry)
-        self.btn_rot.pos = (self.btn_aspect.x - dp(52), ry)
-        self.btn_cc.pos = (self.btn_rot.x - dp(52), ry)
+        # transport row (bottom, no backgrounds)
+        ry = y0 + dp(8)
+        cx = x0 + W / 2.0
+        play, mid, sd = dp(60), dp(48), dp(48)
+        gap = max(dp(2), min(dp(14), (W - 2 * pad - 2 * sd - play - 4 * mid) / 8.0))
+        self.btn_play.pos = (cx - play / 2.0, ry)
+        self.btn_rew.pos = (self.btn_play.x - gap - mid, ry + dp(6))
+        self.btn_prev.pos = (self.btn_rew.x - gap - mid, ry + dp(6))
+        self.btn_fwd.pos = (self.btn_play.x + play + gap, ry + dp(6))
+        self.btn_next.pos = (self.btn_fwd.x + mid + gap, ry + dp(6))
+        self.btn_lock.pos = (x0 + pad, ry + dp(6))
+        self.btn_aspect.pos = (x0 + W - pad - sd, ry + dp(6))
         self.btn_unlock.center = (x0 + pad + dp(34), y0 + H / 2.0)
         # subtitles
-        base = dp(144) if self.ctl_visible else dp(28)
+        base = dp(140) if self.ctl_visible else dp(28)
         self.sub_lbl.size = (W * 0.9, dp(110))
         self.sub_lbl.pos = (x0 + W * 0.05, y0 + base)
         self._place_video()
