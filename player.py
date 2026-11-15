@@ -300,6 +300,10 @@ class PlayerPage(Page):
 
     def _on_error(self, msg):
         self.app.root.say('تعذر تشغيل الفيديو')
+        try:
+            self.app.show_error('PLAYBACK ERROR:\n\n' + str(msg))
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ playback actions
     def _step(self):

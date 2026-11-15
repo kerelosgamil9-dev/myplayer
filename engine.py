@@ -87,18 +87,27 @@ class VideoEngine(object):
             opts['vf'] = vf
         if start > 0.5:
             opts['ss'] = float(start)
-        level = bridge.engine_level()
-        thread_lib = 'threading' if level in (1, 3) else 'SDL'
-        if level in (2, 3):
-            opts['an'] = True               # no audio at all (safest mode)
-        bridge.crumb('engine: open L%d %s ss=%s speed=%s' % (level, self.path, start, self.speed))
-        try:
-            self.player = MediaPlayer(self.path, thread_lib=thread_lib, loglevel='error', ff_opts=opts)
-        except Exception as e:
-            traceback.print_exc()
-            self.player = None
+        errs = []
+        self.player = None
+        for attempt in range(4):
+            level = bridge.engine_level()
+            o = dict(opts)
+            thread_lib = 'threading' if level in (1, 3) else 'SDL'
+            if level in (2, 3):
+                o['an'] = True               # no audio at all (safest mode)
+            bridge.crumb('engine: open L%d %s ss=%s speed=%s' % (level, self.path, start, self.speed))
+            try:
+                self.player = MediaPlayer(self.path, thread_lib=thread_lib, loglevel='error', ff_opts=o)
+                break
+            except Exception as ex:
+                traceback.print_exc()
+                errs.append('L%d: %s' % (level, ex))
+                bridge.crumb('engine: failed L%d %s' % (level, ex))
+                self.player = None
+                bridge.bump_engine_level()
+        if self.player is None:
             if self.on_error:
-                self.on_error(str(e))
+                self.on_error('\n'.join(errs))
             return
         bridge.crumb('engine: opened')
         self._anchor_media = float(start)
