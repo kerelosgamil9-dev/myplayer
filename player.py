@@ -10,6 +10,7 @@ Gestures
     swipe vertical left    brightness
     swipe vertical right   volume
 """
+import gc
 import os
 import random
 import time
@@ -75,33 +76,6 @@ class Pill(Widget):
         return False
 
 
-class SpeedChip(Tap):
-    """Pill that shows the current speed; tap to step through the common speeds."""
-
-    def __init__(self, callback=None, **kw):
-        kw.setdefault('size_hint', (None, None))
-        kw.setdefault('size', (dp(66), dp(34)))
-        super(SpeedChip, self).__init__(callback=callback, **kw)
-        self.lbl = Txt(halign='center', font_size=sp(14), bold=True, size_hint=(None, None))
-        self.add_widget(self.lbl)
-        self.hot = False
-        self.bind(pos=self._lay, size=self._lay)
-
-    def set_speed(self, text, hot):
-        self.lbl.ltext = text
-        self.hot = hot
-        self.lbl.color = ACCENT if hot else (1, 1, 1, 1)
-        self._lay()
-
-    def _lay(self, *a):
-        self.canvas.before.clear()
-        with self.canvas.before:
-            Color(1, 1, 1, 0.16)
-            RoundedRectangle(pos=self.pos, size=self.size, radius=[self.height / 2.0])
-        self.lbl.pos = self.pos
-        self.lbl.size = self.size
-
-
 class PlayerPage(Page):
     def __init__(self, app, keys, index, cid=None, **kw):
         super(PlayerPage, self).__init__(app, **kw)
@@ -135,6 +109,12 @@ class PlayerPage(Page):
         self._brightness = None
         self._ended = False
         self._last_up = 0.0
+        self._place_key = None
+        self._cur_txt = None
+        self._dur_txt = None
+        self.perf_on = False                    # performance overlay (player menu)
+        self.perf = None
+        self._perf_next = 0.0
         self.engine = Engine(on_frame=self._on_frame, on_eof=self._on_eof, on_error=self._on_error)
 
         with self.canvas.before:
@@ -193,8 +173,23 @@ class PlayerPage(Page):
         if self.store.setting('keep_awake'):
             bridge.keep_awake(True)
         if self.key is None:
+            self._quiet_start()
             self._start_current()
         self.show_controls(True)
+
+    def _quiet_start(self):
+        """Playback must not hitch: (1) the pages under the player are not drawn at all while it
+        is on top, (2) everything the app allocated so far is moved out of the garbage collector's
+        reach so it never scans it in the middle of a video."""
+        try:
+            self.app.root.suspend_below(self)
+        except Exception:
+            pass
+        try:
+            gc.collect()
+            gc.freeze()
+        except Exception:
+            pass
 
     def on_close(self):
         if self._closed:
@@ -207,6 +202,10 @@ class PlayerPage(Page):
         except Exception:
             pass
         self.engine.close()
+        try:
+            gc.unfreeze()
+        except Exception:
+            pass
         bridge.set_immersive(False)
         bridge.keep_awake(False)
         if self._brightness is not None:
@@ -300,12 +299,19 @@ class PlayerPage(Page):
 
     # ------------------------------------------------------------------ engine callbacks
     def _on_frame(self, tex):
-        if self._vrect.texture is not tex:
-            self._vrect.texture = tex
-        key = (tuple(self.engine.size), tuple(self.size), self.aspect)
-        if key != getattr(self, '_place_key', None):
+        """A new picture is ready.  The engine drew it into `tex` behind Kivy's back, so the
+        screen must be told to redraw (without this the picture only refreshes when some other
+        widget happens to change, which looks like heavy stutter)."""
+        vr = self._vrect
+        if vr.texture is not tex:
+            vr.texture = tex
+            self._place_key = None
+        w, h = self.engine.size
+        key = (w, h, self.width, self.height, self.aspect)
+        if key != self._place_key:
             self._place_key = key
             self._place_video()
+        self.canvas.ask_update()
 
     def _on_eof(self):
         if self._closed:
@@ -366,12 +372,6 @@ class PlayerPage(Page):
         if say:
             self.app.root.say('السرعة ' + core.fmt_speed(self.speed))
 
-    def cycle_speed(self):
-        opts = [1.0, 1.25, 1.5, 2.0, 2.5, 3.0]
-        cur = min(range(len(opts)), key=lambda i: abs(opts[i] - self.speed))
-        self.set_speed(opts[(cur + 1) % len(opts)], say=False)
-        self.show_controls(True)
-
     def _sync_speed_tag(self):
         if abs(self.speed - 1.0) > 1e-6 and not self.hold_active:
             self.speed_tag.show(core.fmt_speed(self.speed),
@@ -416,10 +416,21 @@ class PlayerPage(Page):
         if self.locked:
             show = False
         self.ctl_visible = show
-        self.ctl.opacity = 1 if show else 0
+        self._attach_ctl(show)
         self._lay()
+        if show:
+            self._update_time_ui(self.engine.position, force=True)
         if show and not self.engine.paused and not self.seeking:
             self._hide_ev = Clock.schedule_once(lambda dt: self.show_controls(False), 3.8)
+
+    def _attach_ctl(self, on):
+        """Hidden controls are taken out of the widget tree: an invisible widget is still drawn
+        (and still costs time) on every frame, a removed one costs nothing."""
+        ctl = self.ctl
+        if on and ctl.parent is None:
+            self.add_widget(ctl, index=len(self.children))      # under pills / subtitles
+        elif not on and ctl.parent is self:
+            self.remove_widget(ctl)
 
     # ------------------------------------------------------------------ seekbar
     def _seek_start(self, v):
@@ -441,22 +452,31 @@ class PlayerPage(Page):
         self.show_controls(True)
 
     # ------------------------------------------------------------------ periodic work
+    def _update_time_ui(self, pos, force=False):
+        e = self.engine
+        if not self.seeking:
+            if e.duration:
+                v = max(0.0, min(1.0, pos / e.duration))
+                if force or abs(v - self.seek.value) > 1.0 / max(300.0, self.seek.width):
+                    self.seek.value = v
+            t = core.fmt_time(pos)
+            if t != self._cur_txt:
+                self._cur_txt = t
+                self.cur.ltext = t
+        d = core.fmt_time(e.duration) if e.duration else '--:--'
+        if d != self._dur_txt:
+            self._dur_txt = d
+            self.dur.ltext = d
+
     def _ui_tick(self, dt):
         if self._closed:
             return
         e = self.engine
         pos = e.position
-        if not self.seeking:
-            if e.duration:
-                self.seek.value = max(0.0, min(1.0, pos / e.duration))
-            t = core.fmt_time(pos)
-            if t != getattr(self, '_cur_txt', None):
-                self._cur_txt = t
-                self.cur.ltext = t
-        d = core.fmt_time(e.duration) if e.duration else '--:--'
-        if d != getattr(self, '_dur_txt', None):
-            self._dur_txt = d
-            self.dur.ltext = d
+        if self.ctl_visible:                    # nobody sees the time bar otherwise
+            self._update_time_ui(pos)
+        if self.perf_on:
+            self._update_perf()
         # subtitles
         txt = ''
         if self.sub_track is not None and self.store.setting('sub_on'):
@@ -475,6 +495,47 @@ class PlayerPage(Page):
             self.save_progress(force=True)
             self.app.root.say('انتهى مؤقت النوم')
             self.show_controls(True)
+
+    # ------------------------------------------------------------------ performance overlay
+    def _set_perf(self, on):
+        self.perf_on = bool(on)
+        if on:
+            if self.perf is None:
+                from kivy.uix.label import Label
+                self.perf = Label(text='', font_size=sp(11), size_hint=(None, None), halign='left',
+                                  valign='top', color=(0.55, 1, 0.55, 1))
+                self.perf.bind(size=lambda w, v: setattr(w, 'text_size', v))
+            if self.perf.parent is None:
+                self.add_widget(self.perf)
+            self._lay_perf()
+            self._perf_next = 0.0
+        elif self.perf is not None and self.perf.parent is self:
+            self.remove_widget(self.perf)
+
+    def _lay_perf(self):
+        if self.perf is not None:
+            self.perf.size = (dp(320), dp(96))
+            self.perf.pos = (self.x + dp(10), (self.y + self.height) - dp(170))
+
+    def _update_perf(self):
+        now = time.time()
+        if now < self._perf_next or self.perf is None:
+            return
+        self._perf_next = now + 0.5
+        e = self.engine
+        impl = getattr(e, 'impl', e)
+        kind = 'HW' if impl.__class__.__name__ == 'HWEngine' else 'SW'
+        st = getattr(impl, 'stats', None) or {}
+        try:
+            loop = Clock.get_rfps()
+        except Exception:
+            loop = 0
+        w, h = e.size
+        self.perf.text = '\n'.join([
+            '%s  %dx%d  speed %.2f' % (kind, w, h, e.speed),
+            'screen %d fps   video %.0f fps' % (loop, st.get('fps', 0)),
+            'longest gap %.0f ms   busiest frame %.1f ms' % (st.get('gap', 0), st.get('work', 0)),
+            'frames skipped %d' % st.get('skipped', 0)])
 
     def save_progress(self, force=False):
         if not self.key:
@@ -573,6 +634,7 @@ class PlayerPage(Page):
         self.sub_lbl.size = (W * 0.9, dp(110))
         self.sub_lbl.pos = (x0 + W * 0.05, y0 + base)
         self._place_video()
+        self._lay_perf()
 
     # ------------------------------------------------------------------ gestures
     def on_touch_down(self, touch):
@@ -817,6 +879,8 @@ class PlayerPage(Page):
                                  callback=lambda w: cycle_hold()))
             rows.append(SheetRow('معلومات الفيديو', icon='info',
                                  callback=lambda w: (sheet.dismiss(), self.info())))
+            rows.append(SheetRow('عداد الأداء (للفحص)', icon='tune', value='شغال' if self.perf_on else 'متوقف',
+                                 callback=lambda w: (self._set_perf(not self.perf_on), sheet.rebuild())))
             return rows
         def pick_speed(v):
             self.set_speed(v)

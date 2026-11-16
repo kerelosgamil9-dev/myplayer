@@ -69,6 +69,8 @@ class Root(FloatLayout):
         self.app = app
         self.pages = []
         self.overlays = []
+        self._susp = []              # pages taken out of the tree while the player covers them
+        self._susp_owner = None
         self.toast = Toast()
         self.add_widget(self.toast)
 
@@ -85,6 +87,30 @@ class Root(FloatLayout):
         self._raise_layers()
         page.on_show()
 
+    def suspend_below(self, page):
+        """A full-screen page (the video player) hides everything under it.  Kivy draws every
+        widget in the tree on every frame, hidden or not, so the pages below are taken out of
+        the tree while it is on top (and put back, in order, when it closes)."""
+        if self._susp:
+            return
+        below = []
+        for p in self.pages:
+            if p is page:
+                break
+            if p.parent is self:
+                below.append(p)
+        for p in below:
+            self.remove_widget(p)
+        self._susp = below
+        self._susp_owner = page
+
+    def _resume_suspended(self):
+        pages, self._susp = self._susp, []
+        self._susp_owner = None
+        for p in reversed(pages):            # the top-most first; each one goes to the very bottom
+            if p.parent is None:
+                self.add_widget(p, index=len(self.children))
+
     def pop(self):
         if len(self.pages) <= 1:
             return False
@@ -93,6 +119,8 @@ class Root(FloatLayout):
             page.on_close()
         finally:
             self.remove_widget(page)
+            if page is self._susp_owner:
+                self._resume_suspended()
         if self.pages:
             self.pages[-1].refresh()
             self.pages[-1].on_show()
@@ -658,6 +686,10 @@ class SettingsPane(FloatLayout):
                            ('sub_on', 'تشغيل الترجمة تلقائياً إن وجدت'),
                            ('vibrate', 'اهتزاز عند التحديد')):
             box.add_widget(SwitchRow(label, bool(self.S(key)), lambda v, k=key: self.put(k, v)))
+        if bridge.ANDROID and (not bridge.hw_enabled() or bridge.hw_bad_count()):
+            # hardware decoding was switched off after a failure: let the user try it again
+            box.add_widget(SheetRow('إعادة تفعيل التشغيل بالهاردوير', icon='restore',
+                                    callback=lambda w: self.reset_hw()))
         box.add_widget(SheetLabel('المظهر'))
         box.add_widget(SwitchRow('إظهار الصور المصغرة', bool(self.S('show_thumbs')),
                                  lambda v: (self.put('show_thumbs', v), a.root.refresh_pages())))
@@ -695,6 +727,11 @@ class SettingsPane(FloatLayout):
             self.put(key, o)
             self.build()
         sheet.show()
+
+    def reset_hw(self):
+        bridge.hw_reset()
+        self.app.root.say('تم تفعيل التشغيل بالهاردوير')
+        self.build()
 
     def restore(self):
         self.app.lib.restore_hidden()

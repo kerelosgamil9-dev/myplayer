@@ -34,6 +34,9 @@ SCREEN_UNSPECIFIED = -1
 _CRUMB = {'path': None}
 
 
+_HW_STARTUP = ('hw: open', 'hw: oes', 'hw: surface', 'hw: prepared', 'hw: shader', 'hw: started')
+
+
 def init_crumbs(app):
     """Breadcrumb file: survives native crashes, shown on the next start."""
     try:
@@ -45,15 +48,26 @@ def init_crumbs(app):
         _CRUMB['path'] = p
         crumb_reset()
         crumb('start')
-        if prev and not prev.endswith(('clean-exit', 'paused')):
-            last = prev.strip().split('\n')[-1]
-            note = ''
+        if prev and not prev.endswith(('clean-exit', 'paused', 'resumed')):
+            lines = prev.strip().split('\n')
+            last = lines[-1]
+            if last.startswith(_HW_STARTUP):
+                # the hardware decoder died while starting THIS video: that video (only) will
+                # use software playback from now on
+                vid = ''
+                for ln in reversed(lines):
+                    if ln.startswith('hw: open '):
+                        vid = ln[len('hw: open '):]
+                        break
+                hw_mark_bad(vid, 'crash at: ' + last)
+                return prev[-600:] + '\n\n>> hardware playback crashed on this video; it will use software playback'
             if last.startswith('hw:'):
-                disable_hw('crash at: ' + last)
-                note = '\n\n>> hardware playback disabled (it crashed); using software playback'
-            elif last.startswith(('engine: open', 'player: load', 'engine: get_frame')):
-                note = '\n\n>> switching playback mode to level %d' % bump_engine_level()
-            return prev[-600:] + note
+                return ''           # died while a video was already playing fine: not the decoder's fault
+            if last.startswith(('engine: open', 'player: load', 'engine: get_frame')):
+                return prev[-600:] + '\n\n>> switching playback mode to level %d' % bump_engine_level()
+            if last in ('start', 'resumed') or last.startswith('player: '):
+                return ''
+            return prev[-600:]
     except Exception:
         pass
     return ''
@@ -91,12 +105,17 @@ def bump_engine_level():
     return n
 
 
-def _hw_flag():
+def _data_file(name):
     p = _CRUMB.get('path')
-    return os.path.join(os.path.dirname(p), 'hw_disabled.txt') if p else None
+    return os.path.join(os.path.dirname(p), name) if p else None
+
+
+def _hw_flag():
+    return _data_file('hw_disabled.txt')
 
 
 def hw_enabled():
+    """Hardware playback on (Android only) unless it was switched off for the whole device."""
     if not ANDROID:
         return False
     p = _hw_flag()
@@ -109,6 +128,71 @@ def disable_hw(reason=''):
         try:
             with open(p, 'w') as f:
                 f.write(reason or 'disabled')
+        except Exception:
+            pass
+
+
+def _bad_list():
+    p = _data_file('hw_bad.txt')
+    try:
+        with open(p, encoding='utf8') as f:
+            return [ln.rstrip('\n') for ln in f if ln.strip()]
+    except Exception:
+        return []
+
+
+def _save_bad(lst):
+    p = _data_file('hw_bad.txt')
+    if not p:
+        return
+    try:
+        if lst:
+            with open(p, 'w', encoding='utf8') as f:
+                f.write('\n'.join(lst) + '\n')
+        elif os.path.exists(p):
+            os.remove(p)
+    except Exception:
+        pass
+
+
+def hw_is_bad(path):
+    """True when hardware playback failed on this particular video before."""
+    return bool(path) and path in _bad_list()
+
+
+def hw_bad_count():
+    return len(_bad_list())
+
+
+def hw_mark_bad(path, reason=''):
+    """Remember a video the hardware decoder cannot play; switch hardware off for the whole
+    device only after three different videos failed."""
+    lst = _bad_list()
+    if path and path not in lst:
+        lst.append(path)
+        _save_bad(lst)
+    if len(lst) >= 3:
+        disable_hw(reason)
+
+
+def hw_ok(path):
+    """A video played fine with hardware decoding: forget an earlier failure."""
+    p = _data_file('hw_bad.txt')
+    if not p or not os.path.exists(p):
+        return
+    lst = _bad_list()
+    if path in lst:
+        lst.remove(path)
+        _save_bad(lst)
+
+
+def hw_reset():
+    """Settings > turn hardware playback on again."""
+    for name in ('hw_disabled.txt', 'hw_bad.txt'):
+        p = _data_file(name)
+        try:
+            if p and os.path.exists(p):
+                os.remove(p)
         except Exception:
             pass
 

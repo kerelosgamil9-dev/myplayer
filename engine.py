@@ -439,7 +439,7 @@ class Engine(object):
         if self.hw is not None:
             self.hw.close(keep_texture=True)
         self.sw.close(keep_texture=True)
-        if bridge.hw_enabled():
+        if bridge.hw_enabled() and not bridge.hw_is_bad(path):
             try:
                 from hwengine import HWEngine
                 if self.hw is None:
@@ -459,16 +459,15 @@ class Engine(object):
         return self.sw.open(path, start, speed, paused, duration_hint)
 
     def _hw_failed(self, path, pos, msg):
+        """Hardware playback broke while a video was playing: only that video goes to software
+        (bridge turns hardware off for the whole device after three different failures)."""
         bridge.crumb('hw: runtime failure %s' % msg)
-        if self.hw is not None and self.hw.black_fail:
-            self._black = getattr(self, '_black', 0) + 1
-            if self._black >= 2:
-                bridge.disable_hw(msg)          # black twice in a row: stop trying
-        else:
-            bridge.disable_hw(msg)
+        bridge.hw_mark_bad(path, msg)
+        paused = bool(self.hw.paused) if self.hw is not None else False
+        dur = self.hw.duration if self.hw is not None else 0.0
         self.impl = self.sw
         if path:
-            self.sw.open(path, pos, self._speed, self.sw.paused, self.hw.duration if self.hw else 0.0)
+            self.sw.open(path, pos, self._speed, paused, dur)
         if self._cb[2]:
             self._cb[2]('Hardware playback failed, switched to software: %s' % msg)
 

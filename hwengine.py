@@ -7,8 +7,16 @@ real 2x speed with pitch kept, perfect A/V sync, little battery use).  The
 decoder renders into a SurfaceTexture; a small Fbo converts that external
 (OES) texture into a normal Kivy texture that the player page draws.
 
+Smoothness rules (this file is on the hot path, 30-60 times a second):
+  * every decoded frame is taken from the SurfaceTexture, even when the app
+    was busy for a moment (queued frames are drained, the newest one is drawn),
+    so the decoder never stalls waiting for us;
+  * the GL work is done once per new frame only, nothing else is touched;
+  * the player clock is read from the MediaPlayer a few times a second and
+    extrapolated in between (each read is an inter-process call).
+
 Everything here is Android-only and wrapped defensively: if anything fails, the
-wrapper in engine.py silently falls back to the ffpyplayer engine.
+wrapper in engine.py silently falls back to the ffpyplayer engine for that video.
 """
 import time
 import traceback
@@ -18,6 +26,8 @@ from kivy.clock import Clock
 import bridge
 
 GL_TEXTURE_EXTERNAL_OES = 0x8D65
+MAX_SIDE = 1920            # pictures are converted at most this big (4K is scaled down)
+MAX_DRAIN = 6              # frames taken from the decoder in one go when we are behind
 
 # SurfaceTexture default transform of a video frame (flips vertically)
 _DEFAULT_MATRIX = [1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 1]
@@ -59,11 +69,14 @@ def _listener_class():
 class HWEngine(object):
     """Same public interface as engine.VideoEngine."""
 
+    last_error = ''
+    black_fail = False
+
     def __init__(self, on_frame=None, on_eof=None, on_error=None, on_fail=None):
         self.on_frame = on_frame
         self.on_eof = on_eof
         self.on_error = on_error
-        self.on_fail = on_fail          # callback(position) when hardware playback does not work
+        self.on_fail = on_fail          # callback(path, position, message) when hardware playback breaks
         self.mp = None
         self.st = None
         self.surface = None
@@ -78,16 +91,23 @@ class HWEngine(object):
         self.paused = False
         self.eof = False
         self.ready = False
+        self.stats = {}                 # published once a second (shown by the performance overlay)
         self._volume = 1.0
         self._ev = None
         self._last_count = 0
+        self._last_ts = 0
+        self._cb_time = 0.0
         self._open_time = 0.0
         self._seek_time = 0.0
         self._seek_target = 0.0
         self._next_slow = 0.0
         self._failed = False
-        self._fbo_size = None
         self._matrix = None
+        self._pos = 0.0
+        self._pos_time = 0.0
+        self._last_ret = 0.0
+        self._gl_retry = 0.0
+        self._reset_stats(0.0)
 
     # ---- lifecycle ------------------------------------------------------------
     def open(self, path, start=0.0, speed=1.0, paused=False, duration_hint=0.0):
@@ -98,23 +118,20 @@ class HWEngine(object):
         self.eof = False
         self.ready = False
         self._failed = False
-        self._last_count = 0
+        self._pos = float(start)
+        self._pos_time = 0.0
+        self._last_ret = float(start)
+        self._seek_target = float(start)
+        self._seek_time = 0.0
+        self._cb_time = time.time()
+        self._reset_stats(time.time())
         if duration_hint:
             self.duration = float(duration_hint)
         try:
             from jnius import autoclass
-            from kivy.graphics.texture import Texture
             bridge.crumb('hw: open %s' % path)
-            self.oes = Texture(width=16, height=16, target=GL_TEXTURE_EXTERNAL_OES, colorfmt='rgba')
-            bridge.crumb('hw: oes texture %s' % self.oes.id)
-            SurfaceTexture = autoclass('android.graphics.SurfaceTexture')
-            Surface = autoclass('android.view.Surface')
+            self._build_surface()
             MP = autoclass('android.media.MediaPlayer')
-            self.st = SurfaceTexture(int(self.oes.id))
-            self.listener = _listener_class()()
-            self.st.setOnFrameAvailableListener(self.listener)
-            self.surface = Surface(self.st)
-            bridge.crumb('hw: surface ready')
             mp = MP()
             mp.setDataSource(path)
             mp.setSurface(self.surface)
@@ -145,11 +162,9 @@ class HWEngine(object):
             self.last_error = str(ex)
             return False
         if self._ev is None:
-            self._ev = Clock.schedule_interval(self._tick, 1.0 / 60.0)
+            # interval 0 = once per Kivy frame (exactly when the screen can show something new)
+            self._ev = Clock.schedule_interval(self._tick, 0)
         return True
-
-    last_error = ''
-    black_fail = False
 
     def close(self, keep_texture=False):
         if self._ev is not None:
@@ -181,35 +196,49 @@ class HWEngine(object):
         self.listener = None
         self.fbo = None
         self.oes = None
-        self._fbo_size = None
 
     # ---- GL ------------------------------------------------------------------------
+    def _build_surface(self):
+        """OES texture + SurfaceTexture + Surface (what the decoder draws into)."""
+        from jnius import autoclass
+        from kivy.graphics.texture import Texture
+        SurfaceTexture = autoclass('android.graphics.SurfaceTexture')
+        Surface = autoclass('android.view.Surface')
+        self.oes = Texture(width=16, height=16, target=GL_TEXTURE_EXTERNAL_OES, colorfmt='rgba')
+        bridge.crumb('hw: oes texture %s' % self.oes.id)
+        self.st = SurfaceTexture(int(self.oes.id))
+        self.listener = _listener_class()()
+        self.st.setOnFrameAvailableListener(self.listener)
+        self.surface = Surface(self.st)
+        self._last_count = 0
+        self._last_ts = 0                       # 0 = no frame yet
+        bridge.crumb('hw: surface ready')
+
     def _make_fbo(self):
         from kivy.graphics import BindTexture, ClearBuffers, ClearColor, Fbo, Rectangle
         w, h = self.size
-        fbo = Fbo(size=(w, h))
+        k = min(1.0, float(MAX_SIDE) / max(w, h))
+        fw = max(2, int(w * k) // 2 * 2)
+        fh = max(2, int(h * k) // 2 * 2)
+        fbo = Fbo(size=(fw, fh))
         fbo.shader.fs = _FS
         ok = getattr(fbo.shader, 'success', True)
-        bridge.crumb('hw: shader ok=%s size=%dx%d' % (ok, w, h))
+        bridge.crumb('hw: shader ok=%s fbo=%dx%d video=%dx%d' % (ok, fw, fh, w, h))
         if not ok:
             raise RuntimeError('video shader failed to compile')
         with fbo:
             ClearColor(0, 0, 0, 1)
             ClearBuffers()
             BindTexture(texture=self.oes, index=1)
-            Rectangle(size=(w, h))
+            Rectangle(size=(fw, fh))
         self.fbo = fbo
-        self._fbo_size = (w, h)
         self.texture = fbo.texture
         try:
-            self.texture.flip_vertical()    # GL output is bottom-up; show it upright
+            self.texture.flip_vertical()        # GL output is bottom-up: show it upright
         except Exception as ex:
             bridge.crumb('hw: flip failed %s' % ex)
         self._matrix = None
         self._set_matrix(_DEFAULT_MATRIX)
-        self._first_frame_time = 0.0
-        self._pix_checks = [0.4, 1.2, 2.5]
-        self._pix_ok = False
 
     def _set_matrix(self, flat):
         from kivy.graphics.transformation import Matrix
@@ -217,10 +246,12 @@ class HWEngine(object):
         m.set(flat=[float(x) for x in flat])
         self.fbo['texmat'] = m
 
-    def _update_frame(self):
+    def _render(self, calls):
+        """Take `calls` frames from the decoder (the last one is the newest) and convert it."""
         st = self.st
-        st.updateTexImage()
-        if self._matrix is None:            # the matrix is constant per video: read it once
+        for _ in range(calls):
+            st.updateTexImage()
+        if self._matrix is None:                # constant for a video: read it once
             flat = [0.0] * 16
             try:
                 st.getTransformMatrix(flat)
@@ -233,64 +264,121 @@ class HWEngine(object):
         self.fbo.ask_update()
         self.fbo.draw()
 
+    def _poll_new(self):
+        """The frame callback has been silent for a while: ask the SurfaceTexture itself."""
+        try:
+            self.st.updateTexImage()
+            ts = self.st.getTimestamp()
+        except Exception:
+            return False
+        if ts != self._last_ts:
+            self._last_ts = ts
+            return True
+        return False
+
+    def _recover_gl(self, ex):
+        """The GL side broke (for instance Android dropped the GL context while the app was in
+        the background): build it again once; give up if it breaks again right away."""
+        now = time.time()
+        bridge.crumb('hw: frame failed %s' % ex)
+        if now - self._gl_retry < 3.0 or self.mp is None:
+            self._fail(str(ex))
+            return False
+        self._gl_retry = now
+        try:
+            old = (self.surface, self.st)
+            self._build_surface()
+            self.mp.setSurface(self.surface)
+            self._make_fbo()
+            for o in old:
+                try:
+                    if o is not None:
+                        o.release()
+                except Exception:
+                    pass
+            self._cb_time = time.time()
+            bridge.crumb('hw: gl rebuilt')
+            return True
+        except Exception as ex2:
+            traceback.print_exc()
+            self._fail('%s / %s' % (ex, ex2))
+            return False
+
     # ---- per-frame ------------------------------------------------------------
+    def _reset_stats(self, now):
+        self._stat = {'t0': now, 'frames': 0, 'skipped': 0, 'gap': 0.0, 'work': 0.0, 'last': 0.0}
+
+    def _publish_stats(self, now):
+        s = self._stat
+        dt = max(0.001, now - s['t0'])
+        self.stats = {'fps': s['frames'] / dt, 'skipped': s['skipped'], 'gap': s['gap'] * 1000.0,
+                      'work': s['work'] * 1000.0}
+        last = s['last']
+        self._reset_stats(now)
+        self._stat['last'] = last
+
     def _tick(self, dt):
-        if self.mp is None or self.listener is None:
+        lst = self.listener
+        if self.mp is None or lst is None:
             return
         now = time.time()
-        cnt = self.listener.count
-        if cnt != self._last_count:
+        cnt = lst.count
+        n = cnt - self._last_count
+        got = False
+        calls = 0
+        if n > 0:
             self._last_count = cnt
+            self._cb_time = now
+            calls = min(n, MAX_DRAIN)
+            got = True
+        elif not self.paused and now - self._cb_time > 0.4:
+            got = self._poll_new()
+            n = 1 if got else 0
+        if got:
+            t0 = time.time()
             try:
-                self._update_frame()
+                self._render(calls)
             except Exception as ex:
-                traceback.print_exc()
-                bridge.crumb('hw: frame failed %s' % ex)
-                self._fail(str(ex))
-                return
-            if not self.ready:
-                self.ready = True
-                self._first_frame_time = now
-                bridge.crumb('hw: first frame')
-            if self.on_frame:
-                self.on_frame(self.texture)
+                if not self._recover_gl(ex):
+                    return
+                got = False
+            if got:
+                if not self.ready:
+                    self.ready = True
+                    bridge.crumb('hw: first frame')
+                    bridge.hw_ok(self.path)
+                s = self._stat
+                s['frames'] += 1
+                s['skipped'] += max(0, n - 1)
+                if s['last']:
+                    s['gap'] = max(s['gap'], now - s['last'])
+                s['last'] = now
+                s['work'] = max(s['work'], time.time() - t0)
+                if self.on_frame:
+                    self.on_frame(self.texture)
         elif not self.ready and not self.paused and now - self._open_time > 4.0:
             self._fail('no video frames from the hardware decoder')
             return
-        if self.ready and not self._pix_ok and self._pix_checks \
-                and now - self._first_frame_time >= self._pix_checks[0]:
-            self._pix_checks.pop(0)
-            if self._picture_visible():
-                self._pix_ok = True
-                bridge.crumb('hw: picture ok')
-            elif not self._pix_checks:
-                bridge.crumb('hw: picture black')
-                self._fail('picture stayed black (GL path)', black=True)
-                return
+        if now - self._stat['t0'] >= 1.0:
+            self._publish_stats(now)
         if now >= self._next_slow:
-            self._next_slow = now + 0.15
+            self._next_slow = now + 0.2
             self._check_end(now)
 
     def _check_end(self, now):
-        if self.paused or self.eof or now - self._seek_time < 0.8:
+        if self.paused or self.eof or not self.duration or now - self._seek_time < 0.8:
+            return
+        if self.position < self.duration - 1.5:      # cheap test first (no inter-process call)
             return
         try:
             playing = self.mp.isPlaying()
             pos = self.mp.getCurrentPosition() / 1000.0
         except Exception:
             return
-        if not playing and self.duration and pos >= self.duration - 0.6:
+        if not playing and pos >= self.duration - 0.6:
             self.eof = True
             if self.on_eof:
                 self.on_eof()
-
-    def _picture_visible(self):
-        try:
-            px = self.texture.pixels
-            return any(px[i] > 12 for i in range(0, len(px), 97))
-        except Exception as ex:
-            bridge.crumb('hw: pixel check failed %s' % ex)
-            return True                     # cannot tell: assume fine
 
     def _fail(self, msg, black=False):
         if self._failed:
@@ -309,17 +397,30 @@ class HWEngine(object):
     # ---- clock -------------------------------------------------------------------
     @property
     def position(self):
-        if time.time() - self._seek_time < 0.7:
+        now = time.time()
+        if now - self._seek_time < 0.7:
             return self._seek_target
-        if self.mp is None:
-            return self._seek_target
-        try:
-            p = self.mp.getCurrentPosition() / 1000.0
-        except Exception:
-            return self._seek_target
+        mp = self.mp
+        if mp is None:
+            return self._last_ret
+        age = now - self._pos_time
+        if self._pos_time == 0.0 or (not self.paused and age >= 0.3):
+            try:
+                p = mp.getCurrentPosition() / 1000.0
+            except Exception:
+                return self._last_ret
+            self._pos, self._pos_time = p, now
+        elif self.paused:
+            p = self._pos
+        else:
+            p = self._pos + age * self.speed
         if self.duration:
             p = min(p, self.duration)
-        return max(0.0, p)
+        p = max(0.0, p)
+        if not self.paused and p < self._last_ret and self._last_ret - p < 0.5:
+            p = self._last_ret                  # never run backwards because of rounding
+        self._last_ret = p
+        return p
 
     # ---- controls -------------------------------------------------------------------
     def _seek_ms(self, ms):
@@ -348,6 +449,7 @@ class HWEngine(object):
 
     def set_pause(self, paused):
         self.paused = bool(paused)
+        self._pos_time = 0.0                    # take a fresh reading of the clock
         if self.mp is None:
             return
         try:
@@ -372,6 +474,8 @@ class HWEngine(object):
         self.eof = False
         self._seek_time = time.time()
         self._seek_target = t
+        self._last_ret = t
+        self._pos_time = 0.0
         self._seek_ms(int(t * 1000))
 
     def seek_relative(self, delta):
@@ -381,8 +485,10 @@ class HWEngine(object):
         speed = float(speed)
         if abs(speed - self.speed) < 1e-6:
             return
+        pos = self.position
         self.speed = speed
         self._apply_speed()
+        self._pos, self._pos_time = pos, time.time()
 
     def set_volume(self, v):
         self._volume = max(0.0, min(1.0, float(v)))
