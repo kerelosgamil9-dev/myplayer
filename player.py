@@ -514,7 +514,7 @@ class PlayerPage(Page):
 
     def _lay_perf(self):
         if self.perf is not None:
-            self.perf.size = (dp(320), dp(96))
+            self.perf.size = (dp(340), dp(96))
             self.perf.pos = (self.x + dp(10), (self.y + self.height) - dp(170))
 
     def _update_perf(self):
@@ -535,7 +535,8 @@ class PlayerPage(Page):
             '%s  %dx%d  speed %.2f' % (kind, w, h, e.speed),
             'screen %d fps   video %.0f fps' % (loop, st.get('fps', 0)),
             'longest gap %.0f ms   busiest frame %.1f ms' % (st.get('gap', 0), st.get('work', 0)),
-            'frames skipped %d' % st.get('skipped', 0)])
+            'frames skipped %d   held %d   pacing %s (%.2f)' % (
+                st.get('skipped', 0), st.get('held', 0), 'on' if st.get('paced') else 'off', st.get('lock', 0))])
 
     def save_progress(self, force=False):
         if not self.key:

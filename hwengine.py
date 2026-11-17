@@ -11,6 +11,12 @@ Smoothness rules (this file is on the hot path, 30-60 times a second):
   * every decoded frame is taken from the SurfaceTexture, even when the app
     was busy for a moment (queued frames are drained, the newest one is drawn),
     so the decoder never stalls waiting for us;
+  * frame pacing: the decoder tells each frame the moment it is meant to be on
+    screen (SurfaceTexture.getTimestamp, aligned to the display's refresh).  When
+    the app's own frames are locked to the same refresh, a frame is held until its
+    slot instead of being drawn the instant it arrives; arrival jitter then can
+    not make a frame appear one refresh early or late ("jumping" pictures).  If
+    anything about the timestamps looks wrong, frames are drawn on arrival as before;
   * the GL work is done once per new frame only, nothing else is touched;
   * the player clock is read from the MediaPlayer a few times a second and
     extrapolated in between (each read is an inter-process call).
@@ -18,8 +24,10 @@ Smoothness rules (this file is on the hot path, 30-60 times a second):
 Everything here is Android-only and wrapped defensively: if anything fails, the
 wrapper in engine.py silently falls back to the ffpyplayer engine for that video.
 """
+import math
 import time
 import traceback
+from collections import deque
 
 from kivy.clock import Clock
 
@@ -28,6 +36,13 @@ import bridge
 GL_TEXTURE_EXTERNAL_OES = 0x8D65
 MAX_SIDE = 1920            # pictures are converted at most this big (4K is scaled down)
 MAX_DRAIN = 6              # frames taken from the decoder in one go when we are behind
+PACE_CATCHUP = 4           # this many frames waiting = we are behind: drain, draw the newest
+PACE_MIN_SAMPLES = 8       # frames seen before the phase estimate is trusted
+PACE_LOCK = 0.6            # how steady the phase must be (0..1) before pacing is used
+PACE_ALPHA = 0.08          # smoothing of the phase estimate
+PACE_MAX_HOLD = 3          # a frame is never held longer than this many ticks
+MAX_STEPS = 6              # frames looked at in one tick
+SHOW, HOLD, SKIP = 0, 1, 2
 
 # SurfaceTexture default transform of a video frame (flips vertically)
 _DEFAULT_MATRIX = [1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 1]
@@ -107,7 +122,22 @@ class HWEngine(object):
         self._pos_time = 0.0
         self._last_ret = 0.0
         self._gl_retry = 0.0
+        self._held = None               # timestamp (ns) of a frame taken but not drawn yet
+        self._held_ticks = 0
+        self._dts = deque(maxlen=31)    # recent tick periods
+        self._vs = 0.0                  # tick period (= display refresh) estimate, seconds
+        self._reset_pacing()
         self._reset_stats(0.0)
+
+    def _reset_pacing(self):
+        self._held = None
+        self._held_ticks = 0
+        self._pc = 0.0                  # running mean of the phase (cos, sin)
+        self._ps = 0.0
+        self._pn = 0
+        self._pace_ok = True            # False when the timestamps are unusable
+        self._bad_ts = 0
+        self._thr = None                # hold threshold (seconds), kept continuous
 
     # ---- lifecycle ------------------------------------------------------------
     def open(self, path, start=0.0, speed=1.0, paused=False, duration_hint=0.0):
@@ -124,6 +154,7 @@ class HWEngine(object):
         self._seek_target = float(start)
         self._seek_time = 0.0
         self._cb_time = time.time()
+        self._reset_pacing()
         self._reset_stats(time.time())
         if duration_hint:
             self.duration = float(duration_hint)
@@ -196,6 +227,7 @@ class HWEngine(object):
         self.listener = None
         self.fbo = None
         self.oes = None
+        self._held = None
 
     # ---- GL ------------------------------------------------------------------------
     def _build_surface(self):
@@ -212,6 +244,7 @@ class HWEngine(object):
         self.surface = Surface(self.st)
         self._last_count = 0
         self._last_ts = 0                       # 0 = no frame yet
+        self._held = None
         bridge.crumb('hw: surface ready')
 
     def _make_fbo(self):
@@ -306,56 +339,184 @@ class HWEngine(object):
 
     # ---- per-frame ------------------------------------------------------------
     def _reset_stats(self, now):
-        self._stat = {'t0': now, 'frames': 0, 'skipped': 0, 'gap': 0.0, 'work': 0.0, 'last': 0.0}
+        self._stat = {'t0': now, 'frames': 0, 'skipped': 0, 'gap': 0.0, 'work': 0.0, 'last': 0.0,
+                      'held': 0}
 
     def _publish_stats(self, now):
         s = self._stat
         dt = max(0.001, now - s['t0'])
         self.stats = {'fps': s['frames'] / dt, 'skipped': s['skipped'], 'gap': s['gap'] * 1000.0,
-                      'work': s['work'] * 1000.0}
+                      'work': s['work'] * 1000.0, 'held': s['held'], 'lock': self._lock(),
+                      'paced': self._pacing_on()}
         last = s['last']
         self._reset_stats(now)
         self._stat['last'] = last
 
+    # ---- pacing -----------------------------------------------------------------
+    def _note_period(self, dt):
+        if 0.002 < dt < 0.1:
+            self._dts.append(dt)
+            if len(self._dts) >= 10:
+                self._vs = sorted(self._dts)[len(self._dts) // 2]
+
+    def _observe(self, ts, mono):
+        """Learn where the app's frames sit relative to the display refresh grid that the frame
+        timestamps are aligned to (a steady phase = frames locked to the refresh)."""
+        x = ts * 1e-9 - mono
+        if ts <= 0 or abs(x) > 1.0:             # not a time on our clock: do not trust timestamps
+            self._bad_ts += 1
+            if self._bad_ts >= 3:
+                self._pace_ok = False
+            return
+        self._bad_ts = 0
+        v = self._vs
+        if v <= 0:
+            return
+        th = 2.0 * math.pi * ((-x) % v) / v
+        a = max(1.0 / (self._pn + 1), PACE_ALPHA)
+        self._pc += a * (math.cos(th) - self._pc)
+        self._ps += a * (math.sin(th) - self._ps)
+        self._pn += 1
+
+    def _observe_current(self, mono):
+        try:
+            self._observe(self.st.getTimestamp(), mono)
+        except Exception:
+            pass
+
+    def _lock(self):
+        return math.hypot(self._pc, self._ps)
+
+    def _phase(self):
+        """Seconds from a display refresh to the start of our tick (circular mean)."""
+        return (math.atan2(self._ps, self._pc) % (2.0 * math.pi)) / (2.0 * math.pi) * self._vs
+
+    def _threshold(self):
+        """A frame is drawn once it is due within this many seconds (about one refresh plus the
+        phase).  The phase is circular, so a plain formula would jump by a whole refresh when the
+        phase passes the refresh boundary; the threshold is therefore moved in small steps."""
+        v = self._vs
+        cand = 1.5 * v - self._phase()
+        t = self._thr
+        if t is None or not (0.55 * v <= t <= 1.75 * v):
+            t = cand
+        else:
+            d = cand - t
+            t += d - v * round(d / v)
+        self._thr = t
+        return t
+
+    def _pacing_on(self):
+        return (self._pace_ok and not self.paused and self._vs > 0 and
+                self._pn >= PACE_MIN_SAMPLES and self._lock() >= PACE_LOCK)
+
+    def _judge(self, ts, mono, queued):
+        """SHOW the held frame now, HOLD it for a later tick or SKIP it (late, newer one waits).
+        A frame is drawn about one refresh before its slot: x is how long until the slot."""
+        if not self._pacing_on():
+            return SHOW
+        v = self._vs
+        thr = self._threshold()
+        x = ts * 1e-9 - mono
+        if queued > 0 and x < thr - v:
+            return SKIP
+        if x > thr and self._held_ticks < PACE_MAX_HOLD:
+            return HOLD
+        return SHOW
+
+    def _latch(self):
+        """Take the next frame from the decoder.  Returns its timestamp, None if nothing new."""
+        st = self.st
+        st.updateTexImage()
+        ts = st.getTimestamp()
+        fresh = ts != self._last_ts or ts == 0   # 0 = this device gives no timestamps
+        self._last_ts = ts
+        return ts if fresh else None
+
+    def _paced_step(self, mono, queued):
+        """One tick with pacing; returns (drawn, frames_skipped)."""
+        skipped = 0
+        for _ in range(MAX_STEPS):
+            if self._held is None:
+                # (when the callback has not been counted yet - it can be late - the decoder is
+                # asked directly: a late callback must not make a frame miss its slot)
+                ts = self._latch()
+                if queued > 0:
+                    queued -= 1
+                    self._last_count += 1
+                if ts is None:
+                    if queued > 0:
+                        continue
+                    return False, skipped
+                self._held = ts
+                self._held_ticks = 0
+                self._observe(ts, mono)
+            verdict = self._judge(self._held, mono, queued)
+            if verdict == SKIP:
+                self._held = None
+                skipped += 1
+                continue
+            if verdict == HOLD:
+                self._held_ticks += 1
+                self._stat['held'] += 1
+                return False, skipped
+            self._held = None
+            self._render(0)
+            return True, skipped
+        return False, skipped
+
+    def _legacy_step(self, queued, cnt, mono):
+        """Draw on arrival: take everything that is waiting, draw the newest."""
+        self._held = None
+        if queued > 0:
+            self._last_count = cnt
+        self._render(min(max(queued, 0), MAX_DRAIN))
+        self._observe_current(mono)
+        return True, max(0, queued - 1)
+
+    # ---- per-frame -------------------------------------------------------------------
     def _tick(self, dt):
         lst = self.listener
         if self.mp is None or lst is None:
             return
         now = time.time()
+        mono = time.monotonic()
+        self._note_period(dt)
         cnt = lst.count
-        n = cnt - self._last_count
-        got = False
-        calls = 0
-        if n > 0:
-            self._last_count = cnt
+        queued = cnt - self._last_count
+        if queued > 0:
             self._cb_time = now
-            calls = min(n, MAX_DRAIN)
-            got = True
-        elif not self.paused and now - self._cb_time > 0.4:
-            got = self._poll_new()
-            n = 1 if got else 0
-        if got:
-            t0 = time.time()
-            try:
-                self._render(calls)
-            except Exception as ex:
-                if not self._recover_gl(ex):
-                    return
-                got = False
-            if got:
-                if not self.ready:
-                    self.ready = True
-                    bridge.crumb('hw: first frame')
-                    bridge.hw_ok(self.path)
-                s = self._stat
-                s['frames'] += 1
-                s['skipped'] += max(0, n - 1)
-                if s['last']:
-                    s['gap'] = max(s['gap'], now - s['last'])
-                s['last'] = now
-                s['work'] = max(s['work'], time.time() - t0)
-                if self.on_frame:
-                    self.on_frame(self.texture)
+        draw = False
+        skipped = 0
+        t0 = time.time()
+        try:
+            if queued < PACE_CATCHUP and self._pacing_on():
+                draw, skipped = self._paced_step(mono, queued)
+            elif queued > 0 or self._held is not None:
+                draw, skipped = self._legacy_step(queued, cnt, mono)
+            elif not self.paused and now - self._cb_time > 0.4:
+                # the callback has been silent for a while: ask the SurfaceTexture itself
+                if self._poll_new():
+                    self._render(0)
+                    draw = True
+        except Exception as ex:
+            if not self._recover_gl(ex):
+                return
+            draw = False
+        if draw:
+            if not self.ready:
+                self.ready = True
+                bridge.crumb('hw: first frame')
+                bridge.hw_ok(self.path)
+            s = self._stat
+            s['frames'] += 1
+            s['skipped'] += skipped
+            if s['last']:
+                s['gap'] = max(s['gap'], now - s['last'])
+            s['last'] = now
+            s['work'] = max(s['work'], time.time() - t0)
+            if self.on_frame:
+                self.on_frame(self.texture)
         elif not self.ready and not self.paused and now - self._open_time > 4.0:
             self._fail('no video frames from the hardware decoder')
             return
@@ -472,6 +633,7 @@ class HWEngine(object):
         if self.duration:
             t = min(t, max(0.0, self.duration - 0.05))
         self.eof = False
+        self._held = None                       # belongs to the old position
         self._seek_time = time.time()
         self._seek_target = t
         self._last_ret = t

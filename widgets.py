@@ -13,7 +13,8 @@ from collections import OrderedDict
 from kivy.clock import Clock
 from kivy.core.image import Image as CoreImage
 from kivy.core.text import Label as CoreLabel, LabelBase
-from kivy.graphics import Color, Ellipse, Line, Mesh, Rectangle, RoundedRectangle
+from kivy.graphics import (Color, Ellipse, Line, Mesh, PopMatrix, PushMatrix, Rectangle,
+                           RoundedRectangle, Translate)
 from kivy.metrics import dp, sp
 from kivy.properties import (BooleanProperty, ListProperty, NumericProperty,
                              StringProperty)
@@ -457,9 +458,18 @@ class Chip(Tap):
 # thumbnails
 # ---------------------------------------------------------------------------
 _tex_cache = OrderedDict()
+_loader_state = {'broken': False}
+
+
+def _remember(path, tex):
+    _tex_cache[path] = tex
+    _tex_cache.move_to_end(path)
+    while len(_tex_cache) > 90:
+        _tex_cache.popitem(last=False)
 
 
 def load_texture(path):
+    """Decode a picture right now (blocks for a few ms)."""
     tex = _tex_cache.get(path)
     if tex is not None:
         _tex_cache.move_to_end(path)
@@ -468,10 +478,50 @@ def load_texture(path):
         tex = CoreImage(path, nocache=True).texture
     except Exception:
         return None
-    _tex_cache[path] = tex
-    while len(_tex_cache) > 90:
-        _tex_cache.popitem(last=False)
+    _remember(path, tex)
     return tex
+
+
+def _is_error_image(proxy):
+    try:
+        from kivy.loader import Loader
+        return getattr(proxy, 'image', None) is Loader.error_image
+    except Exception:
+        return False
+
+
+def load_texture_async(path, done):
+    """done(texture or None) is called on the main thread: at once when the picture is already
+    cached, otherwise after Kivy's loader decoded it on a worker thread (so scrolling never waits
+    for a JPEG).  Falls back to decoding right now if the loader is unusable."""
+    tex = _tex_cache.get(path)
+    if tex is not None:
+        _tex_cache.move_to_end(path)
+        done(tex)
+        return
+    if not _loader_state['broken']:
+        try:
+            from kivy.loader import Loader
+            proxy = Loader.image(path, nocache=True)
+
+            def on_load(p, path=path):
+                tex = None
+                if not _is_error_image(p):
+                    try:
+                        tex = p.texture
+                    except Exception:
+                        tex = None
+                if tex is not None:
+                    _remember(path, tex)
+                done(tex)
+            if proxy.loaded:
+                on_load(proxy)
+            else:
+                proxy.bind(on_load=on_load)
+            return
+        except Exception:
+            _loader_state['broken'] = True
+    done(load_texture(path))
 
 
 class Thumb(Widget):
@@ -483,14 +533,43 @@ class Thumb(Widget):
         self.radius = radius if radius is not None else dp(12)
         self.source = None
         self._tex = None
+        self._req = 0
+        self._ev = None
         self.bind(pos=self._draw, size=self._draw)
 
     def set_source(self, path):
         if path == self.source:
             return
         self.source = path
-        self._tex = load_texture(path) if path else None
+        self._req += 1
+        if self._ev is not None:
+            self._ev.cancel()
+            self._ev = None
+        if not path:
+            self._tex = None
+        else:
+            tex = _tex_cache.get(path)
+            if tex is not None:
+                _tex_cache.move_to_end(path)
+                self._tex = tex
+            else:
+                self._tex = None
+                # a row that is scrolling past changes its picture every few frames: wait a
+                # moment so that only pictures which stay on screen get decoded
+                req = self._req
+                self._ev = Clock.schedule_once(lambda dt, p=path, r=req: self._start_load(p, r), 0.04)
         self._draw()
+
+    def _start_load(self, path, req):
+        self._ev = None
+        if req != self._req:
+            return
+
+        def done(tex, req=req):
+            if req == self._req and tex is not None:
+                self._tex = tex
+                self._draw()
+        load_texture_async(path, done)
 
     def _draw(self, *a):
         self.canvas.clear()
@@ -682,7 +761,10 @@ class FieldInput(FloatLayout):
 # virtualised list with selection + drag reordering
 # ---------------------------------------------------------------------------
 class Row(Widget):
-    """Base class for list rows. Subclasses implement fill() and relayout()."""
+    """Base class for list rows. Subclasses implement fill() and relayout().
+
+    A row is laid out at y = 0 (inside its Carrier); the list moves it with a Translate, so a
+    row never has to re-layout its children just because it moved."""
     kind = 'row'
 
     def __init__(self, **kw):
@@ -691,11 +773,35 @@ class Row(Widget):
         self.idx = -1
         self.item = None
         self.ctx = None
-        self.ty = 0.0
+        self._quiet = False
+        self._sig = None
         self.bind(pos=self._on_geom, size=self._on_geom)
 
     def _on_geom(self, *a):
-        self.relayout()
+        if not self._quiet:
+            self.relayout()
+
+    def place(self, x, y, w, h):
+        """Set position and size with one layout at most (the caller lays the row out when this
+        returns True)."""
+        if (self.x, self.y, self.width, self.height) == (x, y, w, h):
+            return False
+        self._quiet = True
+        try:
+            self.size = (w, h)
+            self.pos = (x, y)
+        finally:
+            self._quiet = False
+        return True
+
+    def unchanged(self, *parts):
+        """True when everything the layout depends on equals what the previous layout used - the
+        drawing would come out the same, so the caller can skip it."""
+        sig = (self.x, self.y, self.width, self.height) + parts
+        if sig == self._sig:
+            return True
+        self._sig = sig
+        return False
 
     def bind_item(self, item, idx, ctx):
         self.item, self.idx, self.ctx = item, idx, ctx
@@ -712,8 +818,39 @@ class Row(Widget):
         return False
 
 
+class Carrier(Widget):
+    """Holds one row.  Its Translate puts the row at its place in the list, so moving a row
+    (scrolling, drag and drop) is a single property write."""
+
+    def __init__(self, row, **kw):
+        kw.setdefault('size_hint', (None, None))
+        kw.setdefault('size', (0, 0))
+        super(Carrier, self).__init__(**kw)
+        with self.canvas.before:
+            PushMatrix()
+            self._tr = Translate(0, 0)
+        with self.canvas.after:
+            PopMatrix()
+        self.row = row
+        row._car = self
+        self.add_widget(row)
+        self.vy = 0.0              # where the row belongs: the target of the drag animation
+
+    def at(self):
+        return self._tr.y
+
+    def put(self, y):
+        if self._tr.y != y:
+            self._tr.y = y
+
+
 class VList(StencilView):
     """Fixed-row-height virtualised list.
+
+    Scrolling moves ONE Translate (``_shift``) that carries every row; each row sits in a Carrier
+    whose own Translate holds its place in the list.  Nothing inside a row is laid out again while
+    the list scrolls, which is what keeps it smooth.  All translations are whole pixels so text
+    stays sharp.
 
     owner callbacks (all optional)
         on_tap(idx, item, x)         short tap
@@ -725,7 +862,7 @@ class VList(StencilView):
     def __init__(self, row_factories, row_h=None, **kw):
         super(VList, self).__init__(**kw)
         self.factories = row_factories
-        self.row_h = row_h or dp(96)
+        self.row_h = float(max(1, int(round(row_h or dp(96)))))      # whole pixels
         self.items = []
         self.ctx = None
         self.scroll = 0.0
@@ -742,6 +879,14 @@ class VList(StencilView):
         self._long_ev = None
         self._drag = None          # dict while dragging
         self._drag_ev = None
+        self._geo = None
+        self._holder = Widget(size_hint=(None, None), size=(0, 0))
+        with self._holder.canvas.before:
+            PushMatrix()
+            self._shift = Translate(0, 0)
+        with self._holder.canvas.after:
+            PopMatrix()
+        self.add_widget(self._holder)
         self.bind(pos=self.relayout, size=self.relayout)
 
     # ---- data ----------------------------------------------------------
@@ -758,11 +903,14 @@ class VList(StencilView):
                 row.bind_item(self.items[i], i, self.ctx)
         self.relayout()
 
+    def _recycle(self, i):
+        row = self.rows.pop(i)
+        self._holder.remove_widget(row._car)
+        self.pools.setdefault(row.kind, []).append(row)
+
     def _release_all(self):
-        for i, row in list(self.rows.items()):
-            self.remove_widget(row)
-            self.pools.setdefault(row.kind, []).append(row)
-        self.rows = {}
+        for i in list(self.rows):
+            self._recycle(i)
 
     def max_scroll(self):
         return max(0.0, len(self.items) * self.row_h - self.height)
@@ -771,8 +919,15 @@ class VList(StencilView):
         self.scroll = max(0.0, min(self.max_scroll(), idx * self.row_h))
         self.relayout()
 
+    def screen_y(self, i):
+        """Bottom edge of row ``i`` in window coordinates (None when it is not on screen)."""
+        row = self.rows.get(i)
+        if row is None:
+            return None
+        return row._car.at() + self._shift.y
+
     # ---- layout ----------------------------------------------------------
-    def _slot(self, i):
+    def _slot_of(self, i):
         d = self._drag
         if not d or i == d['from']:
             return i
@@ -783,52 +938,65 @@ class VList(StencilView):
             return i + 1
         return i
 
-    def _acquire(self, i):
+    def _acquire(self, i, vy):
         item = self.items[i]
         kind = item.get('kind', 'row') if isinstance(item, dict) else 'row'
         pool = self.pools.setdefault(kind, [])
-        row = pool.pop() if pool else self.factories[kind]()
+        if pool:
+            row = pool.pop()
+        else:
+            row = self.factories[kind]()
+            Carrier(row)
         row.kind = kind
-        row.size = (self.width, self.row_h)
-        row.bind_item(item, i, self.ctx)
-        self.add_widget(row)
+        row.place(self.x, 0.0, self.width, self.row_h)
+        car = row._car
+        car.vy = vy
+        car.put(vy)
+        row.bind_item(item, i, self.ctx)          # one layout, at the final geometry
+        self._holder.add_widget(car)
         self.rows[i] = row
         return row
 
     def relayout(self, *a):
-        n = len(self.items)
-        rh = self.row_h
         if self.height <= 1:
             return
+        n = len(self.items)
+        rh = self.row_h
         self.scroll = max(0.0, min(self.scroll, self.max_scroll()))
+        shift = float(round(self.scroll))
+        base = float(round(self.y + self.height))
+        geo = (self.x, self.width, rh, base)
+        moved = geo != self._geo
+        self._geo = geo
         first = max(0, int(self.scroll // rh) - 1)
         last = min(n - 1, int((self.scroll + self.height) // rh) + 1)
         wanted = set(range(first, last + 1))
-        if self._drag:
-            wanted.add(self._drag['from'])
+        d = self._drag
+        if d:
+            wanted.add(d['from'])
         for i in list(self.rows):
             if i not in wanted:
-                row = self.rows.pop(i)
-                self.remove_widget(row)
-                self.pools.setdefault(row.kind, []).append(row)
+                self._recycle(i)
+        if self._shift.y != shift:
+            self._shift.y = shift
         for i in wanted:
+            vy = base - (self._slot_of(i) + 1) * rh
             row = self.rows.get(i)
             if row is None:
-                row = self._acquire(i)
-            if row.width != self.width or row.height != rh:
-                row.size = (self.width, rh)
-            slot = self._slot(i)
-            row.ty = (self.y + self.height) - (slot + 1) * rh + self.scroll
-            if self._drag and i == self._drag['from']:
-                row.pos = (self.x, self._drag['y'])
-            elif self._drag:
-                if row.x != self.x:
-                    row.x = self.x
-                # smooth movement is handled by _drag_tick
-                if abs(row.y - row.ty) > rh * 3:
-                    row.y = row.ty
+                self._acquire(i, vy)
+                continue
+            car = row._car
+            car.vy = vy
+            if moved and row.place(self.x, 0.0, self.width, rh):
+                row.relayout()
+            if d and i == d['from']:
+                car.put(round(d['y']) - shift)
+            elif d:
+                # smooth movement is handled by _drag_tick; only far jumps are instant
+                if abs(car.at() - vy) > rh * 3:
+                    car.put(vy)
             else:
-                row.pos = (self.x, row.ty)
+                car.put(vy)
 
     # ---- touch -------------------------------------------------------------
     def index_at(self, y):
@@ -945,7 +1113,7 @@ class VList(StencilView):
     def _start_fling(self, v):
         self._fling_v = max(-dp(6000), min(dp(6000), v))
         if self._fling is None:
-            self._fling = Clock.schedule_interval(self._fling_tick, 1 / 60.0)
+            self._fling = Clock.schedule_interval(self._fling_tick, 0)      # every frame
 
     def _stop_fling(self):
         if self._fling is not None:
@@ -954,6 +1122,7 @@ class VList(StencilView):
         self._fling_v = 0.0
 
     def _fling_tick(self, dt):
+        dt = min(dt, 0.05)              # a long frame must not make the list jump
         self.scroll += self._fling_v * dt
         self._fling_v *= 0.94 ** (dt * 60.0)
         before = self.scroll
@@ -966,13 +1135,14 @@ class VList(StencilView):
         row = self.rows.get(idx)
         if row is None:
             return
-        self._drag = {'from': idx, 'to': idx, 'y': row.y, 'touch_y': touch.y,
-                      'off': touch.y - row.y}
-        self.remove_widget(row)          # re-add so it is drawn above the others
-        self.add_widget(row)
+        car = row._car
+        y = car.at() + self._shift.y
+        self._drag = {'from': idx, 'to': idx, 'y': y, 'touch_y': touch.y, 'off': touch.y - y}
+        self._holder.remove_widget(car)          # re-add so it is drawn above the others
+        self._holder.add_widget(car)
         row.opacity = 0.95
         if self._drag_ev is None:
-            self._drag_ev = Clock.schedule_interval(self._drag_tick, 1 / 60.0)
+            self._drag_ev = Clock.schedule_interval(self._drag_tick, 0)
 
     def _drag_move(self, y):
         d = self._drag
@@ -994,22 +1164,34 @@ class VList(StencilView):
         d = self._drag
         if not d:
             return
+        dt = min(dt, 0.05)
         # auto scroll near the edges
         edge = dp(70)
         ty = d['touch_y']
-        if ty > (self.y + self.height) - edge:
-            self.scroll -= dp(9) * (1 + (ty - ((self.y + self.height) - edge)) / edge)
+        top = self.y + self.height
+        speed = dp(9) * dt * 60.0
+        if ty > top - edge:
+            self.scroll -= speed * (1 + (ty - (top - edge)) / edge)
         elif ty < self.y + edge:
-            self.scroll += dp(9) * (1 + ((self.y + edge) - ty) / edge)
+            self.scroll += speed * (1 + ((self.y + edge) - ty) / edge)
         self.scroll = max(0.0, min(self.scroll, self.max_scroll()))
         self._update_drag_target()
         self.relayout()
         k = min(1.0, dt * 18.0)
+        shift = self._shift.y
         for i, row in self.rows.items():
+            car = row._car
             if i == d['from']:
-                row.y = d['y']
+                car.put(round(d['y']) - shift)
+                continue
+            diff = car.vy - car.at()
+            if abs(diff) <= 1.0:
+                car.put(car.vy)
             else:
-                row.y += (row.ty - row.y) * k
+                step = diff * k
+                if abs(step) < 1.0:
+                    step = 1.0 if diff > 0 else -1.0
+                car.put(round(car.at() + step))
 
     def _end_drag(self):
         d = self._drag

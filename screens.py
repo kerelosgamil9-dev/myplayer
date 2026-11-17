@@ -62,6 +62,11 @@ class Page(FloatLayout):
     def refresh(self):
         pass
 
+    def on_resume(self):
+        """Back on top again because the page above it closed."""
+        self.refresh()
+        self.on_show()
+
 
 class Root(FloatLayout):
     def __init__(self, app, **kw):
@@ -69,8 +74,7 @@ class Root(FloatLayout):
         self.app = app
         self.pages = []
         self.overlays = []
-        self._susp = []              # pages taken out of the tree while the player covers them
-        self._susp_owner = None
+        self._covered = []           # (page, [pages taken out of the tree while it is on top])
         self.toast = Toast()
         self.add_widget(self.toast)
 
@@ -84,14 +88,16 @@ class Root(FloatLayout):
     def push(self, page):
         self.pages.append(page)
         self.add_widget(page)
+        self.suspend_below(page)
         self._raise_layers()
         page.on_show()
 
     def suspend_below(self, page):
-        """A full-screen page (the video player) hides everything under it.  Kivy draws every
-        widget in the tree on every frame, hidden or not, so the pages below are taken out of
-        the tree while it is on top (and put back, in order, when it closes)."""
-        if self._susp:
+        """Pages are full screen and opaque, so whatever is under the top page is invisible.  Kivy
+        draws every widget in the tree on every frame, hidden or not, which doubles the work of
+        scrolling a list; the pages below are therefore taken out of the tree while a page is on
+        top of them (and put back, in order, when it closes)."""
+        if page not in self.pages:
             return
         below = []
         for p in self.pages:
@@ -99,17 +105,21 @@ class Root(FloatLayout):
                 break
             if p.parent is self:
                 below.append(p)
+        if not below:
+            return
         for p in below:
             self.remove_widget(p)
-        self._susp = below
-        self._susp_owner = page
+        self._covered.append((page, below))
 
-    def _resume_suspended(self):
-        pages, self._susp = self._susp, []
-        self._susp_owner = None
-        for p in reversed(pages):            # the top-most first; each one goes to the very bottom
-            if p.parent is None:
-                self.add_widget(p, index=len(self.children))
+    def _uncover(self, page):
+        for k in range(len(self._covered) - 1, -1, -1):
+            owner, pages = self._covered[k]
+            if owner is not page:
+                continue
+            del self._covered[k]
+            for p in reversed(pages):        # the top-most first; each one goes to the very bottom
+                if p.parent is None and p in self.pages:
+                    self.add_widget(p, index=len(self.children))
 
     def pop(self):
         if len(self.pages) <= 1:
@@ -119,11 +129,9 @@ class Root(FloatLayout):
             page.on_close()
         finally:
             self.remove_widget(page)
-            if page is self._susp_owner:
-                self._resume_suspended()
+            self._uncover(page)
         if self.pages:
-            self.pages[-1].refresh()
-            self.pages[-1].on_show()
+            self.pages[-1].on_resume()
         return True
 
     def show_overlay(self, ov):
@@ -278,6 +286,10 @@ class VideoRow(ListRow):
     def relayout(self):
         if self.item is None or self.ctx is None:
             return
+        ctx = self.ctx
+        if self.unchanged(ctx.sel_mode, ctx.reorder, self.is_selected(), bool(self.badge.ltext),
+                          round(self.frac, 3)):
+            return
         self.draw_selection()
         tw, th = dp(128), dp(72)
         self.thumb.size = (tw, th)
@@ -330,6 +342,9 @@ class CollRow(ListRow):
     def relayout(self):
         if self.item is None or self.ctx is None:
             return
+        ctx = self.ctx
+        if self.unchanged(ctx.sel_mode, ctx.reorder, self.is_selected()):
+            return
         self.draw_selection()
         tw, th = dp(142), dp(80)
         self.thumb.size = (tw, th)
@@ -358,6 +373,8 @@ class CreateRow(Row):
         self.add_widget(self.plus)
 
     def relayout(self):
+        if self.unchanged():
+            return
         tw, th = dp(142), dp(80)
         x = (self.x + self.width) - dp(16) - tw
         y = (self.y + self.height / 2.0) - th / 2.0 - dp(3)
@@ -970,6 +987,9 @@ class HomePage(Page, ListPageMixin):
         self.vlist.scroll = 0
         self.rebuild()
 
+    def on_resume(self):
+        self.refresh()                      # the list stays where the user left it
+
     def refresh(self):
         if self.nav == 'me':
             self.me.build()
@@ -1298,6 +1318,9 @@ class CollectionPage(Page, ListPageMixin):
         self.empty.size = (self.width - dp(60), dp(80))
 
     def on_show(self):
+        self.refresh()
+
+    def on_resume(self):
         self.refresh()
 
     def on_back(self):

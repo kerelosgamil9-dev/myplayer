@@ -11,6 +11,7 @@ import bisect
 import json
 import os
 import re
+import threading
 import time
 import unicodedata
 import uuid
@@ -280,10 +281,21 @@ def load_subtitle(path):
 # persistence
 # ---------------------------------------------------------------------------
 class Store(object):
-    def __init__(self, path):
+    def __init__(self, path, background=False):
         self.path = path
         self.data = {}
         self._dirty = False
+        # background=True: ordinary saves serialise the data on the calling thread (a few ms) and
+        # let a worker thread do the slow part (flash write + fsync), so the screen never waits
+        # for storage in the middle of a video or a scroll.  save(force=True) always writes
+        # synchronously (app pause / exit).
+        self.background = background
+        self._lock = threading.Lock()          # guards _pending / _busy
+        self._io = threading.Lock()            # one disk write at a time
+        self._pending = None                   # (seq, text) newest snapshot not yet written
+        self._busy = False
+        self._seq = 0
+        self._written = 0
         self.load()
 
     def _defaults(self):
@@ -324,26 +336,73 @@ class Store(object):
     def save(self, force=False):
         if not (self._dirty or force):
             return True
-        tmp = self.path + '.tmp'
         try:
-            os.makedirs(os.path.dirname(self.path) or '.', exist_ok=True)
-            with open(tmp, 'w', encoding='utf-8') as f:
-                json.dump(self.data, f, ensure_ascii=False)
-                f.flush()
-                try:
-                    os.fsync(f.fileno())
-                except OSError:
-                    pass
-            if os.path.exists(self.path):
-                try:
-                    os.replace(self.path, self.path + '.bak')
-                except OSError:
-                    pass
-            os.replace(tmp, self.path)
-            self._dirty = False
-            return True
-        except OSError:
+            # json.dumps uses the C encoder; json.dump(f) would use the (much slower) Python one
+            text = json.dumps(self.data, ensure_ascii=False)
+        except (TypeError, ValueError):
             return False
+        self._seq += 1
+        seq = self._seq
+        self._dirty = False
+        if force or not self.background:
+            with self._lock:
+                self._pending = None           # an older queued snapshot must not overwrite this one
+            ok = self._write(seq, text)
+            if not ok:
+                self._dirty = True
+            return ok
+        with self._lock:
+            self._pending = (seq, text)
+            if self._busy:
+                return True
+            self._busy = True
+        threading.Thread(target=self._writer, name='store-writer', daemon=True).start()
+        return True
+
+    def _writer(self):
+        while True:
+            with self._lock:
+                job, self._pending = self._pending, None
+                if job is None:
+                    self._busy = False
+                    return
+            if not self._write(*job):
+                self._dirty = True              # try again with the next save
+
+    def flush(self, timeout=5.0):
+        """Wait until background writes have reached the disk."""
+        end = time.time() + timeout
+        while time.time() < end:
+            with self._lock:
+                if not self._busy and self._pending is None:
+                    return True
+            time.sleep(0.005)
+        return False
+
+    def _write(self, seq, text):
+        tmp = self.path + '.tmp'
+        with self._io:
+            if seq < self._written:
+                return True                     # a newer snapshot is already on disk
+            try:
+                os.makedirs(os.path.dirname(self.path) or '.', exist_ok=True)
+                with open(tmp, 'w', encoding='utf-8') as f:
+                    f.write(text)
+                    f.flush()
+                    try:
+                        os.fsync(f.fileno())
+                    except OSError:
+                        pass
+                if os.path.exists(self.path):
+                    try:
+                        os.replace(self.path, self.path + '.bak')
+                    except OSError:
+                        pass
+                os.replace(tmp, self.path)
+                self._written = seq
+                return True
+            except OSError:
+                return False
 
     # settings -------------------------------------------------------------
     def setting(self, key):

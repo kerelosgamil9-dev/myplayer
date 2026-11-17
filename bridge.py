@@ -241,8 +241,17 @@ def data_dir(app):
 
 
 def cache_dir(app):
+    """Folder of the thumbnails.  The path is remembered: the list asks for it for every row that
+    scrolls into view, and it must not cost two system calls each time."""
+    d = getattr(app, '_thumb_dir', None)
+    if d:
+        return d
     d = os.path.join(data_dir(app), 'thumbs')
     os.makedirs(d, exist_ok=True)
+    try:
+        app._thumb_dir = d
+    except Exception:
+        pass
     return d
 
 
@@ -519,6 +528,7 @@ class ThumbService(object):
                 video, out = self.queue.pop(0)
             ok = False
             try:
+                os.makedirs(os.path.dirname(out), exist_ok=True)
                 ok = _make_thumb_android(video, out)
             except Exception:
                 LAST_THUMB_ERROR[0] = traceback.format_exc()[-300:]
