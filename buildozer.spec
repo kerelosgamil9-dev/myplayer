@@ -13,6 +13,8 @@ requirements = python3,kivy==2.3.0,ffpyplayer,pyjnius,android
 orientation = portrait
 fullscreen = 0
 icon.filename = %(source.dir)s/icon.png
+icon.adaptive_foreground.filename = %(source.dir)s/icon_fg.png
+icon.adaptive_background.filename = %(source.dir)s/icon_bg.png
 presplash.filename = %(source.dir)s/presplash.png
 android.presplash_color = #000000
 
@@ -27,7 +29,7 @@ android.archs = arm64-v8a
 android.accept_sdk_license = True
 android.allow_backup = True
 android.logcat_filters = *:S python:D
-p4a.branch = v2024.01.21
+
 [buildozer]
 log_level = 2
 warn_on_root = 1

@@ -114,7 +114,24 @@ class ProPlayerApp(App):
                 'PREVIOUS RUN ENDED ABRUPTLY. Last steps:\n\n' + self.prev_crash), 1.0)
         Clock.schedule_interval(lambda dt: self.store.save(), 20)
         Clock.schedule_once(self._check_thumbs, 15)
+        Clock.schedule_once(self._tune_runtime, 1.0)
         return self.root
+
+    def _tune_runtime(self, dt):
+        """Fewer pauses while scrolling: everything built at startup is excluded from the garbage
+        collector's scans, and it runs much less often; pictures are uploaded one per frame."""
+        import gc
+        try:
+            gc.collect()
+            gc.freeze()
+            gc.set_threshold(40000, 20, 20)
+        except Exception:
+            pass
+        try:
+            from kivy.loader import Loader
+            Loader.max_upload_per_frame = 1
+        except Exception:
+            pass
 
     def _check_thumbs(self, dt):
         t = getattr(self, 'thumbs', None)
