@@ -4,7 +4,7 @@ screens.py - navigation root, rows, home page (playlists / folders / videos /
 history / me), collection page and the video picker.
 """
 from kivy.clock import Clock
-from kivy.graphics import Color, Ellipse, Line, Rectangle, RoundedRectangle
+from kivy.graphics import Color, Ellipse, Line, Rectangle, RoundedRectangle, Triangle
 from kivy.metrics import dp, sp
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.floatlayout import FloatLayout
@@ -14,23 +14,25 @@ from kivy.uix.widget import Widget
 import bridge
 import core
 import textfix
-from widgets import (ACCENT, BG, DANGER, DIVIDER, SUB, SURFACE, SURFACE2, TEXT, ChipsRow, Dialog,
-                     FieldInput, Icon, IconButton, MenuSheet, PromptDialog, Row, SheetLabel,
-                     SheetRow, SheetTitle, PillSwitch, Tap, Thumb, Toast, Txt, VList)
+from widgets import (ACCENT, ACCENT_SOFT, BG, DANGER, DIVIDER, ON_ACCENT, SUB, SURFACE, SURFACE2, TEXT,
+                     ChipsRow, Dialog, EmptyState, FieldInput, Group, Icon, IconButton, MenuSheet,
+                     PromptDialog, Row, SheetLabel, SheetRow, SheetTitle, PillSwitch, Tap, Thumb,
+                     Tag, Toast, Txt, VList, icon_chip)
 
 
 # ---------------------------------------------------------------------------
 # root / pages
 # ---------------------------------------------------------------------------
 class Page(FloatLayout):
-    """Full screen page with an opaque black background."""
+    """Full screen page with an opaque background."""
+    BGCOLOR = BG
 
     def __init__(self, app, **kw):
         kw.setdefault('size_hint', (1, 1))
         super(Page, self).__init__(**kw)
         self.app = app
         with self.canvas.before:
-            Color(*BG)
+            Color(*self.BGCOLOR)
             self._bg = Rectangle(pos=self.pos, size=self.size)
         self.bind(pos=self._bg_geo, size=self._bg_geo)
 
@@ -254,10 +256,10 @@ class VideoRow(ListRow):
 
     def __init__(self, **kw):
         super(VideoRow, self).__init__(**kw)
-        self.thumb = Thumb(radius=dp(10), size=(dp(128), dp(72)))
-        self.title = Txt(font_size=sp(16), nlines=2, valign='bottom', size_hint=(None, None))
-        self.info = Txt(font_size=sp(13), color=SUB, valign='top', size_hint=(None, None))
-        self.badge = Txt(font_size=sp(11), halign='center', size_hint=(None, None))
+        self.thumb = Thumb(radius=dp(12), size=(dp(128), dp(72)))
+        self.title = Txt(font_size=sp(15.5), nlines=2, valign='bottom', size_hint=(None, None))
+        self.info = Txt(font_size=sp(12.5), color=SUB, valign='top', size_hint=(None, None))
+        self.badge = Tag()
         for w in (self.thumb, self.title, self.info, self.badge):
             self.add_widget(w)
         self.frac = 0.0
@@ -280,40 +282,40 @@ class VideoRow(ListRow):
         if self.frac > 0.02:
             parts.append('%d%%' % int(self.frac * 100))
         self.info.ltext = '  •  '.join(parts)
-        self.badge.ltext = core.fmt_time(dur) if dur else ''
+        self.badge.set_text(core.fmt_time(dur) if dur else '')
         self.set_thumb_for(self.thumb, key)
 
     def relayout(self):
         if self.item is None or self.ctx is None:
             return
         ctx = self.ctx
-        if self.unchanged(ctx.sel_mode, ctx.reorder, self.is_selected(), bool(self.badge.ltext),
+        if self.unchanged(ctx.sel_mode, ctx.reorder, self.is_selected(), self.badge.ltext,
                           round(self.frac, 3)):
             return
         self.draw_selection()
         tw, th = dp(128), dp(72)
+        cy = self.y + self.height / 2.0
         self.thumb.size = (tw, th)
-        self.thumb.pos = ((self.x + self.width) - dp(16) - tw, (self.y + self.height / 2.0) - th / 2.0)
+        self.thumb.pos = ((self.x + self.width) - dp(16) - tw, cy - th / 2.0)
         left = self.left_bound()
-        tx_right = self.thumb.x - dp(12)
+        tx_right = self.thumb.x - dp(14)
         w = max(10, tx_right - left)
-        self.title.pos = (left, (self.y + self.height / 2.0))
+        self.title.pos = (left, cy)
         self.title.size = (w, th / 2.0 + dp(6))
-        self.info.pos = (left, (self.y + self.height / 2.0) - th / 2.0 + dp(2))
+        self.info.pos = (left, cy - th / 2.0 + dp(2))
         self.info.size = (w, th / 2.0 - dp(8))
-        bw = dp(46) if self.badge.ltext else 0
-        self.badge.size = (bw, dp(18))
-        self.badge.pos = (self.thumb.x + dp(6), self.thumb.y + dp(5))
+        watched = self.frac > 0.02
+        self.badge.pos = (self.thumb.x + tw - dp(6) - self.badge.width,
+                          self.thumb.y + (dp(11) if watched else dp(6)))
         self.canvas.after.clear()
         with self.canvas.after:
-            if self.badge.ltext:
-                Color(0, 0, 0, 0.72)
-                RoundedRectangle(pos=self.badge.pos, size=self.badge.size, radius=[dp(5)])
-            if self.frac > 0.02:
-                Color(1, 1, 1, 0.3)
-                Rectangle(pos=(self.thumb.x, self.thumb.y), size=(tw, dp(3)))
+            if watched:
+                bx, by, bwid = self.thumb.x + dp(8), self.thumb.y + dp(5), tw - dp(16)
+                Color(1, 1, 1, 0.30)
+                RoundedRectangle(pos=(bx, by), size=(bwid, dp(3)), radius=[dp(1.5)])
                 Color(*ACCENT)
-                Rectangle(pos=(self.thumb.x, self.thumb.y), size=(tw * min(1.0, self.frac), dp(3)))
+                RoundedRectangle(pos=(bx, by), size=(max(dp(3), bwid * min(1.0, self.frac)), dp(3)),
+                                 radius=[dp(1.5)])
 
 
 class CollRow(ListRow):
@@ -322,8 +324,8 @@ class CollRow(ListRow):
     def __init__(self, **kw):
         super(CollRow, self).__init__(**kw)
         self.thumb = Thumb(radius=dp(14), size=(dp(142), dp(80)))
-        self.title = Txt(font_size=sp(18), valign='bottom', size_hint=(None, None))
-        self.info = Txt(font_size=sp(14), color=SUB, valign='top', size_hint=(None, None))
+        self.title = Txt(font_size=sp(17.5), bold=True, valign='bottom', size_hint=(None, None))
+        self.info = Txt(font_size=sp(13.5), color=SUB, valign='top', size_hint=(None, None))
         for w in (self.thumb, self.title, self.info):
             self.add_widget(w)
 
@@ -347,19 +349,24 @@ class CollRow(ListRow):
             return
         self.draw_selection()
         tw, th = dp(142), dp(80)
+        cy = self.y + self.height / 2.0
         self.thumb.size = (tw, th)
-        self.thumb.pos = ((self.x + self.width) - dp(16) - tw, (self.y + self.height / 2.0) - th / 2.0 - dp(3))
+        self.thumb.pos = ((self.x + self.width) - dp(16) - tw, cy - th / 2.0 - dp(3))
         left = self.left_bound()
-        w = max(10, self.thumb.x - dp(14) - left)
-        self.title.pos = (left, (self.y + self.height / 2.0))
+        w = max(10, self.thumb.x - dp(16) - left)
+        self.title.pos = (left, cy)
         self.title.size = (w, dp(30))
-        self.info.pos = (left, (self.y + self.height / 2.0) - dp(30))
+        self.info.pos = (left, cy - dp(30))
         self.info.size = (w, dp(30))
         self.canvas.after.clear()
-        with self.canvas.after:               # the "stack" strip above the cover
-            Color(0.32, 0.32, 0.33, 1)
-            RoundedRectangle(pos=(self.thumb.x + dp(12), (self.thumb.y + self.thumb.height) - dp(1)),
-                             size=(tw - dp(24), dp(8)), radius=[dp(5), dp(5), 0, 0])
+        top = self.thumb.y + self.thumb.height
+        with self.canvas.after:               # two cards peeking out behind the cover: "a stack"
+            Color(0.20, 0.21, 0.25, 1)
+            RoundedRectangle(pos=(self.thumb.x + dp(22), top - dp(1)), size=(tw - dp(44), dp(9)),
+                             radius=[dp(5), dp(5), 0, 0])
+            Color(0.29, 0.30, 0.35, 1)
+            RoundedRectangle(pos=(self.thumb.x + dp(11), top - dp(1)), size=(tw - dp(22), dp(5)),
+                             radius=[dp(5), dp(5), 0, 0])
 
 
 class CreateRow(Row):
@@ -367,8 +374,9 @@ class CreateRow(Row):
 
     def __init__(self, **kw):
         super(CreateRow, self).__init__(**kw)
-        self.label = Txt(ltext='إنشاء قائمة التشغيل الخاصة بك', font_size=sp(17), size_hint=(None, None))
-        self.plus = Icon(name='plus', color=[0.35, 0.35, 0.37, 1], size=(dp(40), dp(40)), stroke=1.4)
+        self.label = Txt(ltext='إنشاء قائمة التشغيل الخاصة بك', font_size=sp(16), bold=True, nlines=2,
+                         size_hint=(None, None))
+        self.plus = Icon(name='plus', color=list(ACCENT), size=(dp(34), dp(34)), stroke=1.9)
         self.add_widget(self.label)
         self.add_widget(self.plus)
 
@@ -380,14 +388,14 @@ class CreateRow(Row):
         y = (self.y + self.height / 2.0) - th / 2.0 - dp(3)
         self.canvas.before.clear()
         with self.canvas.before:
-            Color(0.32, 0.32, 0.33, 1)
-            RoundedRectangle(pos=(x + dp(12), y + th - dp(1)), size=(tw - dp(24), dp(8)),
-                             radius=[dp(5), dp(5), 0, 0])
-            Color(0.87, 0.87, 0.88, 1)
+            Color(*ACCENT_SOFT)
             RoundedRectangle(pos=(x, y), size=(tw, th), radius=[dp(14)])
+            Color(ACCENT[0], ACCENT[1], ACCENT[2], 0.55)
+            Line(rounded_rectangle=(x + dp(0.7), y + dp(0.7), tw - dp(1.4), th - dp(1.4), dp(14)),
+                 width=dp(1.3))
         self.plus.center = (x + tw / 2.0, y + th / 2.0)
         self.label.pos = (self.x + dp(16), (self.y + self.height / 2.0) - dp(20))
-        self.label.size = (x - dp(14) - self.x - dp(16), dp(40))
+        self.label.size = (x - dp(16) - self.x - dp(16), dp(40))
 
 
 ROW_FACTORIES = {'video': VideoRow, 'coll': CollRow, 'create': CreateRow}
@@ -425,14 +433,14 @@ class Header(Widget):
             self.add_widget(extra)
         self.big = big
         self.title.ltext = title
-        self.title.font_size = sp(30) if big else sp(19)
+        self.title.font_size = sp(29) if big else sp(19.5)
         self.sub.ltext = sub
         self._lay()
 
     def _lay(self, *a):
         self.canvas.before.clear()
         with self.canvas.before:
-            Color(0, 0, 0, 1)
+            Color(*BG)
             Rectangle(pos=self.pos, size=self.size)
         x_r = (self.x + self.width) - dp(6)
         for b in self.right_btns:
@@ -548,14 +556,15 @@ def selection_keys(ctx, lib):
 class TabBar(Widget):
     def __init__(self, tabs, on_pick, **kw):
         kw.setdefault('size_hint', (1, None))
-        kw.setdefault('height', dp(48))
+        kw.setdefault('height', dp(52))
         super(TabBar, self).__init__(**kw)
         self.tabs = tabs                  # [(id, label)] in display order: first = rightmost
         self.on_pick = on_pick
         self.current = tabs[0][0]
         self.labels = {}
+        self._hit = []
         for tid, label in tabs:
-            t = Txt(ltext=label, font_size=sp(17), size_hint=(None, None), halign='center')
+            t = Txt(ltext=label, font_size=sp(15.5), size_hint=(None, None), halign='center')
             self.labels[tid] = t
             self.add_widget(t)
         self.bind(pos=self._lay, size=self._lay)
@@ -566,23 +575,29 @@ class TabBar(Widget):
 
     def _lay(self, *a):
         self.canvas.before.clear()          # never canvas.clear(): it would drop the children
-        x = (self.x + self.width) - dp(24)
+        x = (self.x + self.width) - dp(16)
         self._hit = []
+        ch = dp(38)
+        cy0 = self.y + (self.height - ch) / 2.0
         with self.canvas.before:
-            Color(0, 0, 0, 1)
+            Color(*BG)
             Rectangle(pos=self.pos, size=self.size)
             for tid, label in self.tabs:
                 t = self.labels[tid]
-                tw = max(dp(30), t.text_width())
-                t.size = (tw + dp(4), self.height - dp(6))
-                t.pos = (x - t.width, self.y + dp(6))
                 active = tid == self.current
-                t.color = ACCENT if active else (0.7, 0.7, 0.72, 1)
+                t.bold = active
+                t.color = ACCENT if active else (0.80, 0.82, 0.87, 1)
+                cw = max(dp(30), t.text_width()) + dp(34)
+                cx0 = x - cw
+                Color(*(ACCENT_SOFT if active else SURFACE))
+                RoundedRectangle(pos=(cx0, cy0), size=(cw, ch), radius=[ch / 2.0])
                 if active:
-                    Color(*ACCENT)
-                    RoundedRectangle(pos=(t.x, self.y), size=(t.width, dp(3)), radius=[dp(1.5)])
-                self._hit.append((t.x - dp(10), (t.x + t.width) + dp(10), tid))
-                x = t.x - dp(26)
+                    Color(ACCENT[0], ACCENT[1], ACCENT[2], 0.55)
+                    Line(rounded_rectangle=(cx0 + 0.5, cy0 + 0.5, cw - 1, ch - 1, ch / 2.0), width=1)
+                t.size = (cw, ch)
+                t.pos = (cx0, cy0)
+                self._hit.append((cx0 - dp(4), cx0 + cw + dp(4), tid))
+                x = cx0 - dp(8)
 
     def on_touch_down(self, touch):
         if not self.collide_point(*touch.pos):
@@ -646,29 +661,86 @@ class NavBar(Widget):
 # ---------------------------------------------------------------------------
 # settings pane
 # ---------------------------------------------------------------------------
-class SwitchRow(Widget):
-    def __init__(self, label, value, on_change, **kw):
+class SwitchRow(Tap):
+    def __init__(self, label, value, on_change, icon=None, **kw):
         kw.setdefault('size_hint', (1, None))
-        kw.setdefault('height', dp(56))
-        super(SwitchRow, self).__init__(**kw)
-        self.lbl = Txt(ltext=label, font_size=sp(16), size_hint=(None, None))
+        kw.setdefault('height', dp(62))
+        super(SwitchRow, self).__init__(callback=lambda w: self.sw._toggle(), **kw)
+        self.lbl = Txt(ltext=label, font_size=sp(16), size_hint=(None, None), nlines=2)
         self.sw = PillSwitch(value=value, on_change=on_change)
-        self.add_widget(self.lbl)
-        self.add_widget(self.sw)
+        self.icon = Icon(name=icon, size=(dp(22), dp(22))) if icon else None
+        for w in (self.icon, self.lbl, self.sw):
+            if w is not None:
+                self.add_widget(w)
         self.bind(pos=self._lay, size=self._lay)
+        self._lay()
 
     def _lay(self, *a):
-        self.sw.pos = (self.x + dp(18), (self.y + self.height / 2.0) - self.sw.height / 2.0)
-        self.lbl.pos = (self.x + dp(18) + self.sw.width + dp(10), self.y)
-        self.lbl.size = (self.width - dp(36) - self.sw.width - dp(10), self.height)
+        pad = dp(18)
+        cy = self.y + self.height / 2.0
+        self.canvas.before.clear()
+        self.sw.pos = (self.x + pad, cy - self.sw.height / 2.0)
+        right = (self.x + self.width) - pad
+        if self.icon is not None:
+            self.icon.center = (right - dp(19), cy)
+            icon_chip(self.canvas.before, right - dp(19), cy, dp(38))
+            right -= dp(52)
+        left = self.x + pad + self.sw.width + dp(12)
+        self.lbl.pos = (left, self.y)
+        self.lbl.size = (max(10, right - left), self.height)
 
-    def on_touch_down(self, touch):
-        if self.collide_point(*touch.pos):
-            if self.sw.on_touch_down(touch):
-                return True
-            self.sw._toggle()
-            return True
-        return False
+
+_app_grad = {}
+
+
+def _app_gradient():
+    t = _app_grad.get('t')
+    if t is None:
+        from kivy.graphics.texture import Texture
+        t = Texture.create(size=(1, 2), colorfmt='rgba')
+        # first row = bottom of the picture: pink below, coral above (the colours of the app icon)
+        t.blit_buffer(bytes([240, 52, 110, 255, 255, 122, 96, 255]), colorfmt='rgba', bufferfmt='ubyte')
+        t.mag_filter = 'linear'
+        _app_grad['t'] = t
+    return t
+
+
+class AppCard(Widget):
+    """Name + logo + a one line summary, at the top of the settings."""
+
+    def __init__(self, **kw):
+        kw.setdefault('size_hint', (1, None))
+        kw.setdefault('height', dp(100))
+        super(AppCard, self).__init__(**kw)
+        self.title = Txt(ltext='Pro Player', bold=True, font_size=sp(21), size_hint=(None, None))
+        self.sub = Txt(ltext='', color=SUB, font_size=sp(14), size_hint=(None, None))
+        self.add_widget(self.title)
+        self.add_widget(self.sub)
+        self.bind(pos=self._lay, size=self._lay)
+        self._lay()
+
+    def set_summary(self, text):
+        self.sub.ltext = text
+
+    def _lay(self, *a):
+        x, y, w, h = self.x, self.y, self.width, self.height
+        self.canvas.before.clear()
+        with self.canvas.before:
+            Color(*SURFACE)
+            RoundedRectangle(pos=(x, y), size=(w, h), radius=[dp(20)])
+            bs = dp(58)
+            bx, by = (x + w) - dp(20) - bs, y + (h - bs) / 2.0
+            Color(1, 1, 1, 1)
+            RoundedRectangle(pos=(bx, by), size=(bs, bs), radius=[dp(16)], texture=_app_gradient())
+            m = bs * 0.2
+            cx, cy = bx + bs / 2.0, by + bs / 2.0
+            Color(1, 1, 1, 1)
+            Triangle(points=[cx - m * 0.75, cy - m * 1.05, cx - m * 0.75, cy + m * 1.05, cx + m * 1.2, cy])
+        tx = bx - dp(16)
+        self.title.pos = (x + dp(20), y + h / 2.0 - dp(2))
+        self.title.size = (tx - x - dp(20), dp(30))
+        self.sub.pos = (x + dp(20), y + h / 2.0 - dp(32))
+        self.sub.size = (tx - x - dp(20), dp(28))
 
 
 class SettingsPane(FloatLayout):
@@ -676,7 +748,8 @@ class SettingsPane(FloatLayout):
         super(SettingsPane, self).__init__(**kw)
         self.app = app
         self.sv = ScrollView(size_hint=(1, 1), do_scroll_x=False, bar_width=dp(3))
-        self.box = BoxLayout(orientation='vertical', size_hint_y=None)
+        self.box = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(4),
+                             padding=[dp(14), dp(8), dp(14), dp(30)])
         self.box.bind(minimum_height=self.box.setter('height'))
         self.sv.add_widget(self.box)
         self.add_widget(self.sv)
@@ -688,45 +761,56 @@ class SettingsPane(FloatLayout):
     def put(self, key, value):
         self.app.store.set_setting(key, value)
 
+    def card(self, title, rows):
+        """A heading and a rounded card with the given rows."""
+        self.box.add_widget(SheetLabel(title))
+        g = Group()
+        for r in rows:
+            g.add_row(r)
+        self.box.add_widget(g)
+
+    def switch(self, key, label, icon):
+        return SwitchRow(label, bool(self.S(key)), lambda v, k=key: self.put(k, v), icon=icon)
+
     def build(self):
         a, lib = self.app, self.app.lib
         box = self.box
         box.clear_widgets()
         n_vid = len(lib.videos)
         n_pl = len([c for c in lib.collections()])
-        box.add_widget(SheetLabel('%d فيديو  •  %d قائمة تشغيل' % (n_vid, n_pl)))
-        box.add_widget(SheetLabel('التشغيل'))
-        for key, label in (('resume', 'استكمال من آخر مكان توقفت عنده'),
-                           ('autoplay_next', 'تشغيل الفيديو التالي تلقائياً'),
-                           ('gestures', 'إيماءات السحب (تقديم / سطوع / صوت)'),
-                           ('keep_awake', 'إبقاء الشاشة مضاءة أثناء التشغيل'),
-                           ('sub_on', 'تشغيل الترجمة تلقائياً إن وجدت'),
-                           ('vibrate', 'اهتزاز عند التحديد')):
-            box.add_widget(SwitchRow(label, bool(self.S(key)), lambda v, k=key: self.put(k, v)))
+        head = AppCard()
+        head.set_summary('%d فيديو  •  %d قائمة تشغيل' % (n_vid, n_pl))
+        box.add_widget(head)
+        rows = [self.switch('resume', 'استكمال من آخر مكان توقفت عنده', 'clock'),
+                self.switch('autoplay_next', 'تشغيل الفيديو التالي تلقائياً', 'next'),
+                self.switch('gestures', 'إيماءات السحب (تقديم / سطوع / صوت)', 'tune'),
+                self.switch('keep_awake', 'إبقاء الشاشة مضاءة أثناء التشغيل', 'brightness'),
+                self.switch('sub_on', 'تشغيل الترجمة تلقائياً إن وجدت', 'subtitle'),
+                self.switch('vibrate', 'اهتزاز عند التحديد', 'bolt')]
         if bridge.ANDROID and (not bridge.hw_enabled() or bridge.hw_bad_count()):
             # hardware decoding was switched off after a failure: let the user try it again
-            box.add_widget(SheetRow('إعادة تفعيل التشغيل بالهاردوير', icon='restore',
-                                    callback=lambda w: self.reset_hw()))
-        box.add_widget(SheetLabel('المظهر'))
-        box.add_widget(SwitchRow('إظهار الصور المصغرة', bool(self.S('show_thumbs')),
-                                 lambda v: (self.put('show_thumbs', v), a.root.refresh_pages())))
-        box.add_widget(SheetLabel('خيارات'))
-        box.add_widget(SheetRow('السرعة عند الضغط المطول', icon='speed',
-                                value=core.fmt_speed(self.S('hold_speed')),
-                                callback=lambda w: self.pick_number('hold_speed', 'السرعة عند الضغط المطول',
-                                                                    [1.5, 2.0, 2.5, 3.0], core.fmt_speed)))
-        box.add_widget(SheetRow('مدة التقديم / الترجيع', icon='fwd', value='%d ث' % self.S('seek_step'),
-                                callback=lambda w: self.pick_number('seek_step', 'مدة التقديم / الترجيع',
-                                                                    [5, 10, 15, 30], lambda x: '%d ث' % x)))
-        box.add_widget(SheetRow('حجم الترجمة', icon='subtitle', value=str(self.S('sub_size')),
-                                callback=lambda w: self.pick_number('sub_size', 'حجم الترجمة',
-                                                                    [16, 20, 22, 26, 30, 36], str)))
-        box.add_widget(SheetLabel('البيانات'))
-        box.add_widget(SheetRow('إظهار القوائم المخفية', icon='restore', callback=lambda w: self.restore()))
-        box.add_widget(SheetRow('مسح الصور المصغرة', icon='trash', callback=lambda w: self.clear_thumbs()))
-        box.add_widget(SheetRow('مسح سجل المشاهدة', icon='clock', callback=lambda w: self.clear_hist()))
-        box.add_widget(SheetRow('إعادة فحص الفيديوهات', icon='rotate', callback=lambda w: a.rescan(True)))
-        box.add_widget(SheetLabel('Pro Player  •  تشغيل الفيديو بالسرعات والترتيب الذي تريده'))
+            rows.append(SheetRow('إعادة تفعيل التشغيل بالهاردوير', icon='restore',
+                                 callback=lambda w: self.reset_hw()))
+        self.card('التشغيل', rows)
+        self.card('المظهر', [
+            SwitchRow('إظهار الصور المصغرة', bool(self.S('show_thumbs')),
+                      lambda v: (self.put('show_thumbs', v), a.root.refresh_pages()), icon='folder_play')])
+        self.card('خيارات', [
+            SheetRow('السرعة عند الضغط المطول', icon='speed', value=core.fmt_speed(self.S('hold_speed')),
+                     callback=lambda w: self.pick_number('hold_speed', 'السرعة عند الضغط المطول',
+                                                         [1.5, 2.0, 2.5, 3.0], core.fmt_speed)),
+            SheetRow('مدة التقديم / الترجيع', icon='step_fwd', value='%d ث' % self.S('seek_step'),
+                     callback=lambda w: self.pick_number('seek_step', 'مدة التقديم / الترجيع',
+                                                         [5, 10, 15, 30], lambda x: '%d ث' % x)),
+            SheetRow('حجم الترجمة', icon='subtitle', value=str(self.S('sub_size')),
+                     callback=lambda w: self.pick_number('sub_size', 'حجم الترجمة',
+                                                         [16, 20, 22, 26, 30, 36], str))])
+        self.card('البيانات', [
+            SheetRow('إظهار القوائم المخفية', icon='restore', callback=lambda w: self.restore()),
+            SheetRow('مسح الصور المصغرة', icon='trash', callback=lambda w: self.clear_thumbs()),
+            SheetRow('مسح سجل المشاهدة', icon='clock', callback=lambda w: self.clear_hist()),
+            SheetRow('إعادة فحص الفيديوهات', icon='rotate', callback=lambda w: a.rescan(True))])
+        box.add_widget(SheetLabel('Pro Player  •  تشغيل الفيديو بالسرعات والترتيب الذي تريده', muted=True))
 
     def pick_number(self, key, title, options, fmt):
         cur = self.S(key)
@@ -901,8 +985,7 @@ class HomePage(Page, ListPageMixin):
         self.tabs.set_current(self.mode)
         self.navbar = NavBar(self.NAVS, self.set_nav)     # kept for code paths, never shown
         self.me = SettingsPane(app, size_hint=(None, None))
-        self.empty = Txt(ltext='', halign='center', color=SUB, font_size=sp(16), nlines=3,
-                         size_hint=(None, None))
+        self.empty = EmptyState('folder_play')
         for w in (self.vlist, self.header, self.tabs, self.empty):
             self.add_widget(w)
         self.btn_search = IconButton('search', callback=lambda w: self.toggle_search(True))
@@ -922,9 +1005,9 @@ class HomePage(Page, ListPageMixin):
         self.header.pos = (self.x, (self.y + self.height) - hh)
         top = self.header.y
         if self.nav == 'library':
-            self.tabs.size = (W, dp(48))
-            self.tabs.pos = (self.x, top - dp(48))
-            top -= dp(52)
+            self.tabs.size = (W, dp(52))
+            self.tabs.pos = (self.x, top - dp(52))
+            top -= dp(56)
             self.tabs.opacity = 1
         else:
             self.tabs.opacity = 0
@@ -1038,14 +1121,19 @@ class HomePage(Page, ListPageMixin):
         self.vlist.set_items(items)
         if not items or (len(items) == 1 and items[0]['kind'] == 'create'):
             if not self.app.loaded:
+                self.empty.icon.name = 'clock'
                 self.empty.ltext = 'جارٍ تحميل الفيديوهات…'
             elif not self.app.permitted:
+                self.empty.icon.name = 'lock'
                 self.empty.ltext = 'يلزم السماح بالوصول إلى الفيديوهات.\nاضغط على «أنا» ثم «إعادة فحص الفيديوهات».'
             elif self.nav == 'history':
+                self.empty.icon.name = 'clock'
                 self.empty.ltext = 'لا يوجد سجل مشاهدة بعد'
             elif self.query:
+                self.empty.icon.name = 'search'
                 self.empty.ltext = 'لا توجد نتائج'
             else:
+                self.empty.icon.name = 'folder_play'
                 self.empty.ltext = 'لا توجد فيديوهات'
         else:
             self.empty.ltext = ''
@@ -1133,7 +1221,7 @@ class HomePage(Page, ListPageMixin):
                 return [SheetTitle('ترتيب القوائم'),
                         SheetRow('حسب الاسم', icon='sort', callback=lambda w: apply('name')),
                         SheetRow('حسب عدد المقاطع', icon='sort', callback=lambda w: apply('count')),
-                        SheetLabel('أو اضغط مطولاً على أي قائمة ثم اسحبها لمكانك')]
+                        SheetLabel('أو اضغط مطولاً على أي قائمة ثم اسحبها لمكانك', muted=True)]
             sheet = MenuSheet(app.root, build)
 
             def apply(how):
@@ -1282,11 +1370,15 @@ class CollectionPage(Page, ListPageMixin):
         self.query = ''
         self.search_on = False
         self.field = None
-        self.fab = Tap(callback=lambda w: self.play_all(), size_hint=(None, None), size=(dp(58), dp(58)))
-        self.fab_icon = Icon(name='play', color=[0, 0, 0, 1], size=(dp(26), dp(26)))
+        self.vlist.bottom_pad = dp(92)                 # the last row must be able to clear the button
+        self.fab = Tap(callback=lambda w: self.play_all(), size_hint=(None, None), size=(dp(172), dp(54)))
+        self.fab.fb_radius = [dp(27)] * 4
+        self.fab_icon = Icon(name='play', color=list(ON_ACCENT), size=(dp(22), dp(22)))
+        self.fab_lbl = Txt(ltext='تشغيل الكل', bold=True, color=ON_ACCENT, font_size=sp(15.5),
+                           halign='center', size_hint=(None, None))
         self.fab.add_widget(self.fab_icon)
-        self.empty = Txt(ltext='', halign='center', color=SUB, font_size=sp(16), nlines=3,
-                         size_hint=(None, None))
+        self.fab.add_widget(self.fab_lbl)
+        self.empty = EmptyState('playlist')
         for w in (self.vlist, self.header, self.empty, self.fab):
             self.add_widget(w)
         self.btn_back = IconButton('back', callback=lambda w: self.app.root.back())
@@ -1307,13 +1399,19 @@ class CollectionPage(Page, ListPageMixin):
         self.header.pos = (self.x, (self.y + self.height) - hh)
         self.vlist.pos = self.pos
         self.vlist.size = (self.width, max(0, (self.y + self.height) - hh - self.y))
-        self.fab.pos = (self.x + dp(18), self.y + dp(20))
+        f = self.fab
+        f.pos = (self.x + dp(18), self.y + dp(20))
         if hasattr(self, 'fab_icon'):
-            self.fab_icon.center = (self.fab.x + self.fab.width / 2.0, self.fab.y + self.fab.height / 2.0)
-        self.fab.canvas.before.clear()
-        with self.fab.canvas.before:
+            f.size = (dp(172), dp(54))
+            self.fab_icon.center = ((f.x + f.width) - dp(30), f.y + f.height / 2.0)
+            self.fab_lbl.pos = (f.x + dp(10), f.y)
+            self.fab_lbl.size = (f.width - dp(10) - dp(54), f.height)
+        f.canvas.before.clear()
+        with f.canvas.before:
+            Color(0, 0, 0, 0.38)                               # soft shadow
+            RoundedRectangle(pos=(f.x, f.y - dp(3)), size=f.size, radius=[dp(27)])
             Color(*ACCENT)
-            Ellipse(pos=self.fab.pos, size=self.fab.size)
+            RoundedRectangle(pos=f.pos, size=f.size, radius=[dp(27)])
         self.empty.pos = (self.x + dp(30), self.vlist.y + self.vlist.height * 0.4)
         self.empty.size = (self.width - dp(60), dp(80))
 

@@ -14,7 +14,7 @@ from kivy.clock import Clock
 from kivy.core.image import Image as CoreImage
 from kivy.core.text import Label as CoreLabel, LabelBase
 from kivy.graphics import (Color, Ellipse, Line, Mesh, PopMatrix, PushMatrix, Rectangle,
-                           RoundedRectangle, Translate)
+                           RoundedRectangle, Translate, Triangle)
 from kivy.metrics import dp, sp
 from kivy.properties import (BooleanProperty, ListProperty, NumericProperty,
                              StringProperty)
@@ -34,14 +34,17 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # ---------------------------------------------------------------------------
 # theme
 # ---------------------------------------------------------------------------
-BG = (0, 0, 0, 1)
-SURFACE = (0.105, 0.105, 0.11, 1)
-SURFACE2 = (0.16, 0.16, 0.17, 1)
-ACCENT = (0.973, 0.42, 0.36, 1)
-TEXT = (1, 1, 1, 1)
-SUB = (0.6, 0.6, 0.62, 1)
-DIVIDER = (1, 1, 1, 0.08)
-DANGER = (0.95, 0.3, 0.3, 1)
+BG = (0.031, 0.033, 0.043, 1)
+SURFACE = (0.082, 0.087, 0.108, 1)
+SURFACE2 = (0.128, 0.134, 0.160, 1)
+ACCENT = (1.0, 0.42, 0.37, 1)
+ACCENT_SOFT = (1.0, 0.42, 0.37, 0.16)
+ON_ACCENT = (0.10, 0.04, 0.04, 1)          # text / icons drawn on top of the accent colour
+TEXT = (0.97, 0.97, 0.98, 1)
+SUB = (0.62, 0.64, 0.69, 1)
+DIVIDER = (1, 1, 1, 0.07)
+DANGER = (1.0, 0.36, 0.36, 1)
+SCRIM = (0, 0, 0, 0.66)                    # translucent dark chips drawn over the video
 
 AR_FONT = 'ProArabic'
 LATIN_FONT = 'Roboto'
@@ -95,6 +98,8 @@ class Txt(Label):
     def __init__(self, text='', **kw):
         kw.pop('text', None)
         ltext = kw.pop('ltext', text)
+        if 'align_mode' not in kw and kw.get('halign') in ('left', 'center', 'right'):
+            kw['align_mode'] = kw['halign']          # an explicit halign must not be overridden later
         kw.setdefault('halign', 'right')
         kw.setdefault('valign', 'middle')
         kw.setdefault('color', TEXT)
@@ -166,6 +171,32 @@ def _arrow_head(cx, cy, r, a, h=4.0):
             (ex - tx * h - nx * h * 0.8, ey - ty * h - ny * h * 0.8)]
 
 
+def _arrow_fill(cx, cy, r, a, h=3.6):
+    """Solid arrow head at angle `a` of a circle, pointing the way the angle grows."""
+    ar = math.radians(a)
+    ex, ey = cx + r * math.cos(ar), cy + r * math.sin(ar)
+    tx, ty = -math.sin(ar), math.cos(ar)
+    nx, ny = math.cos(ar), math.sin(ar)
+    return ('fill', [(ex + tx * h, ey + ty * h), (ex + nx * h * 0.85, ey + ny * h * 0.85),
+                     (ex - nx * h * 0.85, ey - ny * h * 0.85)])
+
+
+def _mirror(ops):
+    """The same icon flipped left <-> right (24 grid)."""
+    out = []
+    for op in ops:
+        k = op[0]
+        if k in ('line', 'fill'):
+            out.append((k, [(24 - x, y) for (x, y) in op[1]]))
+        elif k == 'rect':
+            out.append((k, 24 - op[1] - op[3], op[2], op[3], op[4]))
+        else:                                   # circle / dot
+            out.append((k, 24 - op[1], op[2], op[3]))
+    return out
+
+
+_STEP_FWD = [('line', _arc(12, 13.2, 8.2, 300, 603, 30)), _arrow_fill(12, 13.2, 8.2, 603, 3.8)]
+
 ICONS = {
     'play': [('fill', [(7, 4), (20, 12), (7, 20)])],
     'pause': [('rect', 6, 4, 4, 16), ('rect', 14, 4, 4, 16)],
@@ -197,7 +228,7 @@ ICONS = {
                  ('dot', 4, 7, 1.3), ('dot', 4, 12, 1.3), ('dot', 4, 17, 1.3)],
     'select_all': [('line', [(4, 7), (4, 20), (17, 20)]), ('line', [(8, 4), (20, 4), (20, 16), (8, 16), (8, 4)]),
                    ('line', [(11, 10), (13.5, 12.5), (17, 8)])],
-    'rotate': [('line', _arc(12, 12, 7.5, 45, 335)), ('line', _arrow_head(12, 12, 7.5, 335, 5.0))],
+    'rotate': [('line', _arc(12, 12, 7.5, 40, 330)), _arrow_fill(12, 12, 7.5, 330, 4.2)],
     'lock': [('line', [(6, 11), (18, 11), (19.5, 12.5), (19.5, 19), (18, 20.5), (6, 20.5), (4.5, 19), (4.5, 12.5), (6, 11)]),
              ('line', [(8, 11), (8, 8)] + _arc(12, 8, 4, 180, 360) + [(16, 8), (16, 11)]), ('dot', 12, 15.8, 1.5)],
     'unlock': [('line', [(6, 11), (18, 11), (19.5, 12.5), (19.5, 19), (18, 20.5), (6, 20.5), (4.5, 19), (4.5, 12.5), (6, 11)]),
@@ -231,6 +262,10 @@ ICONS = {
                 ('line', [(12, 8), (12, 12), (15, 14)])],
     'up': [('line', [(6, 15), (12, 9), (18, 15)])],
     'down': [('line', [(6, 9), (12, 15), (18, 9)])],
+    'step_fwd': _STEP_FWD,
+    'step_back': _mirror(_STEP_FWD),
+    'volume_mute': [('fill', [(4, 9), (8, 9), (13, 5), (13, 19), (8, 15), (4, 15)]),
+                    ('line', [(16, 9.5), (21, 14.5)]), ('line', [(21, 9.5), (16, 14.5)])],
     'bolt': [('fill', [(13, 3), (6, 13), (11, 13), (10, 21), (18, 10), (13, 10)])],
 }
 
@@ -305,6 +340,7 @@ class Tap(Widget):
         self._long_ev = None
         self._long_fired = False
         self._fb = None
+        self.fb_radius = None              # corner radii of the press highlight (cards)
         self.bind(pos=self._fb_upd, size=self._fb_upd)
 
     def _fb_upd(self, *a):
@@ -318,8 +354,11 @@ class Tap(Widget):
         self._fb = None
         if v:
             with self.canvas.after:
-                Color(1, 1, 1, 0.10)
-                self._fb = Rectangle(pos=self.pos, size=self.size)
+                Color(1, 1, 1, 0.09)
+                if self.fb_radius:
+                    self._fb = RoundedRectangle(pos=self.pos, size=self.size, radius=self.fb_radius)
+                else:
+                    self._fb = Rectangle(pos=self.pos, size=self.size)
 
     def on_touch_down(self, touch):
         if self.disabled or not self.collide_point(*touch.pos):
@@ -426,12 +465,15 @@ class PillSwitch(Tap):
         self.canvas.clear()
         h = self.height
         with self.canvas:
-            Color(*(ACCENT if self.value else (0.35, 0.35, 0.37, 1)))
+            Color(*(ACCENT if self.value else (0.27, 0.28, 0.32, 1)))
             RoundedRectangle(pos=self.pos, size=self.size, radius=[h / 2.0])
-            Color(1, 1, 1, 1)
-            r = h * 0.38
+            r = h * 0.37
             cx = (self.x + self.width) - h / 2.0 if self.value else self.x + h / 2.0
-            Ellipse(pos=(cx - r, (self.y + self.height / 2.0) - r), size=(2 * r, 2 * r))
+            cy = self.y + self.height / 2.0
+            Color(0, 0, 0, 0.22)                                   # soft shadow under the knob
+            Ellipse(pos=(cx - r, cy - r - dp(1)), size=(2 * r, 2 * r))
+            Color(1, 1, 1, 1) if self.value else Color(0.82, 0.83, 0.87, 1)
+            Ellipse(pos=(cx - r, cy - r), size=(2 * r, 2 * r))
 
 
 class Chip(Tap):
@@ -440,7 +482,7 @@ class Chip(Tap):
         super(Chip, self).__init__(callback=callback, **kw)
         self.selected = selected
         self.label = Txt(ltext=label, halign='center', font_size=sp(15), bold=selected,
-                         color=(0, 0, 0, 1) if selected else TEXT, size_hint=(None, None))
+                         color=ON_ACCENT if selected else TEXT, size_hint=(None, None))
         self.add_widget(self.label)
         self.bind(pos=self._draw, size=self._draw)
         self._draw()
@@ -449,7 +491,7 @@ class Chip(Tap):
         self.canvas.before.clear()
         with self.canvas.before:
             Color(*(ACCENT if self.selected else SURFACE2))
-            RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(10)])
+            RoundedRectangle(pos=self.pos, size=self.size, radius=[self.height / 2.0])
         self.label.pos = self.pos
         self.label.size = self.size
 
@@ -576,9 +618,18 @@ class Thumb(Widget):
         if self.width < 2:
             return
         with self.canvas:
-            Color(0.03, 0.03, 0.035, 1)
-            RoundedRectangle(pos=self.pos, size=self.size, radius=[self.radius])
             tex = self._tex
+            if tex is None:
+                # no picture (yet): a calm panel with a play mark instead of a black hole
+                Color(0.105, 0.11, 0.14, 1)
+                RoundedRectangle(pos=self.pos, size=self.size, radius=[self.radius])
+                m = min(self.width, self.height) * 0.15
+                cx, cy = self.x + self.width / 2.0, self.y + self.height / 2.0
+                Color(1, 1, 1, 0.13)
+                Triangle(points=[cx - m * 0.8, cy - m, cx - m * 0.8, cy + m, cx + m * 1.1, cy])
+            else:
+                Color(0.02, 0.02, 0.025, 1)
+                RoundedRectangle(pos=self.pos, size=self.size, radius=[self.radius])
             if tex is not None:
                 tw, th = tex.size
                 if tw > 0 and th > 0:
@@ -608,6 +659,10 @@ class SeekBar(Widget):
         self.bind(pos=self._draw, size=self._draw, value=self._draw)
         self._draw()
 
+    def thumb_x(self):
+        pad = dp(10)
+        return self.x + pad + max(1.0, self.width - 2 * pad) * max(0.0, min(1.0, self.value))
+
     def _frac(self, x):
         pad = dp(10)
         w = max(1.0, self.width - 2 * pad)
@@ -617,17 +672,24 @@ class SeekBar(Widget):
         self.canvas.clear()
         pad = dp(10)
         w = max(1.0, self.width - 2 * pad)
-        th = dp(3.5) if not self.dragging else dp(5)
-        y = (self.y + self.height / 2.0) - th / 2.0
+        th = dp(4) if not self.dragging else dp(6)
+        cy = self.y + self.height / 2.0
+        y = cy - th / 2.0
         v = max(0.0, min(1.0, self.value))
         with self.canvas:
-            Color(1, 1, 1, 0.28)
+            Color(1, 1, 1, 0.24)
             RoundedRectangle(pos=(self.x + pad, y), size=(w, th), radius=[th / 2.0])
             Color(*ACCENT)
             RoundedRectangle(pos=(self.x + pad, y), size=(max(th, w * v), th), radius=[th / 2.0])
-            r = dp(8) if not self.dragging else dp(11)
-            Color(*ACCENT)
-            Ellipse(pos=(self.x + pad + w * v - r, (self.y + self.height / 2.0) - r), size=(2 * r, 2 * r))
+            kx = self.x + pad + w * v
+            if self.dragging:
+                Color(ACCENT[0], ACCENT[1], ACCENT[2], 0.28)           # halo while the finger is down
+                Ellipse(pos=(kx - dp(15), cy - dp(15)), size=(dp(30), dp(30)))
+            r = dp(7.5) if not self.dragging else dp(10)
+            Color(0, 0, 0, 0.25)
+            Ellipse(pos=(kx - r, cy - r - dp(1)), size=(2 * r, 2 * r))
+            Color(1, 1, 1, 1)
+            Ellipse(pos=(kx - r, cy - r), size=(2 * r, 2 * r))
 
     def on_touch_down(self, touch):
         if self.disabled or not self.collide_point(*touch.pos):
@@ -677,7 +739,7 @@ class FieldInput(FloatLayout):
         self._caret_on = True
         with self.canvas.before:
             Color(*SURFACE2)
-            self._bg = RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(12)])
+            self._bg = RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(14)])
         self.ti = TextInput(text=text, multiline=False, write_tab=False,
                             background_normal='', background_active='', background_color=(0, 0, 0, 0),
                             foreground_color=(0, 0, 0, 0), cursor_color=(0, 0, 0, 0),
@@ -742,7 +804,13 @@ class FieldInput(FloatLayout):
 
     def _draw_caret(self):
         self.canvas.after.clear()
-        if not self.ti.focus or not self._caret_on:
+        if not self.ti.focus:
+            return
+        with self.canvas.after:                       # accent outline while typing
+            Color(ACCENT[0], ACCENT[1], ACCENT[2], 0.85)
+            Line(rounded_rectangle=(self.x + dp(0.8), self.y + dp(0.8), self.width - dp(1.6),
+                                    self.height - dp(1.6), dp(14)), width=dp(1.3))
+        if not self._caret_on:
             return
         txt = self.ti.text
         pad = dp(16)
@@ -863,6 +931,7 @@ class VList(StencilView):
         super(VList, self).__init__(**kw)
         self.factories = row_factories
         self.row_h = float(max(1, int(round(row_h or dp(96)))))      # whole pixels
+        self.bottom_pad = 0.0            # free space after the last row (under a floating button)
         self.items = []
         self.ctx = None
         self.scroll = 0.0
@@ -913,7 +982,7 @@ class VList(StencilView):
             self._recycle(i)
 
     def max_scroll(self):
-        return max(0.0, len(self.items) * self.row_h - self.height)
+        return max(0.0, len(self.items) * self.row_h + self.bottom_pad - self.height)
 
     def scroll_to(self, idx):
         self.scroll = max(0.0, min(self.max_scroll(), idx * self.row_h))
@@ -1268,7 +1337,7 @@ class Panel(FloatLayout):
     def __init__(self, radius=None, **kw):
         kw.setdefault('size_hint', (None, None))
         super(Panel, self).__init__(**kw)
-        self.radius = radius or [dp(20)] * 4
+        self.radius = radius or [dp(24)] * 4
         with self.canvas.before:
             Color(*SURFACE)
             self._bg = RoundedRectangle(pos=self.pos, size=self.size, radius=self.radius)
@@ -1279,15 +1348,27 @@ class Panel(FloatLayout):
         self._bg.size = self.size
 
 
+def icon_chip(canvas, cx, cy, d=None, danger=False):
+    """The soft round tile behind a row icon."""
+    d = d or dp(38)
+    with canvas:
+        if danger:
+            Color(DANGER[0], DANGER[1], DANGER[2], 0.14)
+        else:
+            Color(1, 1, 1, 0.07)
+        Ellipse(pos=(cx - d / 2.0, cy - d / 2.0), size=(d, d))
+
+
 class SheetRow(Tap):
     def __init__(self, label, icon=None, value=None, checked=False, danger=False, callback=None, **kw):
-        kw.setdefault('height', dp(54))
+        kw.setdefault('height', dp(58))
         super(SheetRow, self).__init__(callback=callback, **kw)
-        col = DANGER if danger else TEXT
-        self.icon = Icon(name=icon, color=list(col), size=(dp(22), dp(22))) if icon else None
-        self.lbl = Txt(ltext=label, color=col, font_size=sp(16), size_hint=(None, None))
+        self.danger = danger
+        col = DANGER if danger else (ACCENT if checked else TEXT)
+        self.icon = Icon(name=icon, color=list(DANGER if danger else TEXT), size=(dp(22), dp(22))) if icon else None
+        self.lbl = Txt(ltext=label, color=col, bold=bool(checked), font_size=sp(16), size_hint=(None, None))
         self.val = Txt(ltext=value or '', color=SUB, font_size=sp(14), halign='left', size_hint=(None, None))
-        self.chk = Icon(name='check', color=list(ACCENT), size=(dp(22), dp(22))) if checked else None
+        self.chk = Icon(name='check', color=list(ACCENT), size=(dp(24), dp(24)), stroke=2.0) if checked else None
         for w in (self.icon, self.lbl, self.val, self.chk):
             if w is not None:
                 self.add_widget(w)
@@ -1296,15 +1377,18 @@ class SheetRow(Tap):
 
     def _lay(self, *a):
         pad = dp(18)
+        cy = self.y + self.height / 2.0
         right = (self.x + self.width) - pad
+        self.canvas.before.clear()
         if self.icon is not None:
-            self.icon.center = (right - dp(11), (self.y + self.height / 2.0))
-            right -= dp(40)
+            self.icon.center = (right - dp(19), cy)
+            icon_chip(self.canvas.before, right - dp(19), cy, dp(38), self.danger)
+            right -= dp(52)
         left = self.x + pad
         if self.chk is not None:
-            self.chk.center = (left + dp(11), (self.y + self.height / 2.0))
-            left += dp(36)
-        vw = dp(120) if self.val.ltext else 0
+            self.chk.center = (left + dp(12), cy)
+            left += dp(40)
+        vw = min(dp(150), self.val.text_width() + dp(10)) if self.val.ltext else 0
         self.val.pos = (left, self.y)
         self.val.size = (vw, self.height)
         self.lbl.pos = (left + vw + dp(6), self.y)
@@ -1314,31 +1398,39 @@ class SheetRow(Tap):
 class SheetTitle(Widget):
     def __init__(self, text, **kw):
         kw.setdefault('size_hint', (1, None))
-        kw.setdefault('height', dp(56))
+        kw.setdefault('height', dp(60))
         super(SheetTitle, self).__init__(**kw)
-        self.lbl = Txt(ltext=text, bold=True, font_size=sp(19), size_hint=(None, None))
+        self.lbl = Txt(ltext=text, bold=True, font_size=sp(20), size_hint=(None, None))
         self.add_widget(self.lbl)
         self.bind(pos=self._lay, size=self._lay)
         self._lay()
 
     def _lay(self, *a):
-        self.lbl.pos = (self.x + dp(18), self.y)
-        self.lbl.size = (self.width - dp(36), self.height)
+        self.lbl.pos = (self.x + dp(20), self.y + dp(2))
+        self.lbl.size = (self.width - dp(40), self.height - dp(4))
+        self.canvas.before.clear()
+        with self.canvas.before:
+            Color(*DIVIDER)
+            Rectangle(pos=(self.x + dp(20), self.y), size=(max(0, self.width - dp(40)), 1))
 
 
 class SheetLabel(Widget):
-    def __init__(self, text, **kw):
+    """Small section heading (accent) - or, with muted=True, a quiet explanatory line."""
+
+    def __init__(self, text, muted=False, **kw):
         kw.setdefault('size_hint', (1, None))
-        kw.setdefault('height', dp(34))
+        kw.setdefault('height', dp(40) if not muted else dp(36))
         super(SheetLabel, self).__init__(**kw)
-        self.lbl = Txt(ltext=text, color=SUB, font_size=sp(13), size_hint=(None, None))
+        self.lbl = Txt(ltext=text, color=SUB if muted else ACCENT, bold=not muted,
+                       font_size=sp(13) if not muted else sp(13), nlines=2 if muted else 1,
+                       valign='bottom' if not muted else 'middle', size_hint=(None, None))
         self.add_widget(self.lbl)
         self.bind(pos=self._lay, size=self._lay)
         self._lay()
 
     def _lay(self, *a):
-        self.lbl.pos = (self.x + dp(18), self.y)
-        self.lbl.size = (self.width - dp(36), self.height)
+        self.lbl.pos = (self.x + dp(20), self.y + (dp(4) if self.lbl.valign == 'bottom' else 0))
+        self.lbl.size = (self.width - dp(40), self.height - dp(4))
 
 
 class ChipsRow(Widget):
@@ -1350,7 +1442,7 @@ class ChipsRow(Widget):
         self.cols = cols
         n = len(options)
         self.nrows = (n + cols - 1) // cols
-        self.height = self.nrows * dp(48) + dp(8)
+        self.height = self.nrows * dp(52) + dp(10)
         self.chips = []
         for val, label in options:
             c = Chip(label, selected=(abs(float(val) - float(current)) < 1e-6),
@@ -1361,16 +1453,16 @@ class ChipsRow(Widget):
         self._lay()
 
     def _lay(self, *a):
-        pad = dp(14)
+        pad = dp(18)
         gap = dp(8)
         cw = (self.width - 2 * pad - gap * (self.cols - 1)) / float(self.cols)
         for i, c in enumerate(self.chips):
             r, col = divmod(i, self.cols)
             # RTL: first chip on the right
             x = (self.x + self.width) - pad - (col + 1) * cw - col * gap
-            y = (self.y + self.height) - dp(4) - (r + 1) * dp(40) - r * dp(8)
+            y = (self.y + self.height) - dp(4) - (r + 1) * dp(44) - r * dp(8)
             c.pos = (x, y)
-            c.size = (cw, dp(40))
+            c.size = (cw, dp(44))
 
 
 class MenuSheet(Overlay):
@@ -1378,23 +1470,27 @@ class MenuSheet(Overlay):
 
     build() is a function returning a list of widgets; call rebuild() to refresh."""
 
+    PAD_TOP = dp(18)
+    PAD_BOTTOM = dp(14)
+
     def __init__(self, root, build, **kw):
         super(MenuSheet, self).__init__(root, **kw)
         self.build = build
         self.panel = Panel()
         self.add_widget(self.panel)
         self.sv = ScrollView(size_hint=(None, None), do_scroll_x=False, bar_width=dp(3))
-        self.box = BoxLayout(orientation='vertical', size_hint_y=None, padding=[0, dp(4), 0, dp(10)])
+        self.box = BoxLayout(orientation='vertical', size_hint_y=None,
+                             padding=[0, self.PAD_TOP, 0, self.PAD_BOTTOM])
         self.box.bind(minimum_height=self.box.setter('height'))
         self.sv.add_widget(self.box)
         self.panel.add_widget(self.sv)
-        self.content_h = dp(14)
+        self.content_h = self.PAD_TOP + self.PAD_BOTTOM
         self.rebuild()
 
     def rebuild(self):
         self.box.clear_widgets()
         widgets = self.build()
-        total = dp(14)
+        total = self.PAD_TOP + self.PAD_BOTTOM
         for w in widgets:
             w.size_hint = (1, None)
             total += w.height
@@ -1407,39 +1503,46 @@ class MenuSheet(Overlay):
         W, H = self.width, self.height
         if W <= 1 or H <= 1 or not getattr(self, '_ready', False):
             return
+        self.panel.canvas.after.clear()
         if W > H:
             pw = min(dp(420), W * 0.55)
             ph = H
-            self.panel.radius = [dp(20), 0, 0, dp(20)]
+            self.panel.radius = [dp(24), 0, 0, dp(24)]
             self.panel.pos = ((self.x + self.width) - pw, self.y)
         else:
             pw = min(W, dp(520))
-            ph = min(self.content_h + dp(8), H * 0.82)
-            self.panel.radius = [dp(22), dp(22), 0, 0]
+            ph = min(self.content_h + dp(6), H * 0.82)
+            self.panel.radius = [dp(26), dp(26), 0, 0]
             self.panel.pos = ((self.x + self.width / 2.0) - pw / 2.0, self.y)
         self.panel._bg.radius = self.panel.radius
         self.panel.size = (pw, ph)
         self.sv.pos = self.panel.pos
         self.sv.size = self.panel.size
+        if W <= H:
+            with self.panel.canvas.after:               # the little grab handle of a bottom sheet
+                Color(1, 1, 1, 0.22)
+                RoundedRectangle(pos=(self.panel.x + pw / 2.0 - dp(20), (self.panel.y + ph) - dp(12)),
+                                 size=(dp(40), dp(4)), radius=[dp(2)])
 
 
 class Dialog(Overlay):
     def __init__(self, root, title, message='', buttons=None, **kw):
         super(Dialog, self).__init__(root, **kw)
         self.extra = None
-        self.panel = Panel(radius=[dp(20)] * 4)
+        self.panel = Panel(radius=[dp(26)] * 4)
         self.add_widget(self.panel)
-        self.title = Txt(ltext=title, bold=True, font_size=sp(19), size_hint=(None, None))
-        self.msg = Txt(ltext=message, color=SUB, font_size=sp(15), nlines=6, keep_nl=True,
+        self.title = Txt(ltext=title, bold=True, font_size=sp(20), size_hint=(None, None))
+        self.msg = Txt(ltext=message, color=(0.78, 0.80, 0.85, 1), font_size=sp(15), nlines=6, keep_nl=True,
                        valign='top', size_hint=(None, None))
         self.panel.add_widget(self.title)
         self.panel.add_widget(self.msg)
         self.btns = []
         for label, cb, kind in (buttons or [('حسناً', None, 'primary')]):
-            b = Tap(callback=(lambda w, cb=cb: self._press(cb)), size_hint=(None, None), height=dp(46))
+            b = Tap(callback=(lambda w, cb=cb: self._press(cb)), size_hint=(None, None), height=dp(48))
             b.kind = kind
-            b.lbl = Txt(ltext=label, halign='center', bold=(kind != 'plain'), font_size=sp(16),
-                        color=(DANGER if kind == 'danger' else ACCENT if kind == 'primary' else TEXT),
+            b.fb_radius = [dp(14)] * 4
+            b.lbl = Txt(ltext=label, halign='center', bold=True, font_size=sp(16),
+                        color=(ON_ACCENT if kind == 'primary' else (1, 1, 1, 1) if kind == 'danger' else TEXT),
                         size_hint=(None, None))
             b.add_widget(b.lbl)
             self.panel.add_widget(b)
@@ -1456,6 +1559,7 @@ class Dialog(Overlay):
 
     def set_extra(self, widget):
         self.extra = widget
+        widget.size_hint = (None, None)            # we set its width ourselves (a hint would stretch it)
         self.panel.add_widget(widget)
         self.place()
 
@@ -1463,14 +1567,14 @@ class Dialog(Overlay):
         W = self.width
         if W <= 1 or not hasattr(self, 'btns'):
             return
-        pw = min(W - dp(32), dp(420))
-        pad = dp(20)
+        pw = min(W - dp(36), dp(420))
+        pad = dp(22)
         msg_lines = 0
         if self.msg.ltext:
             msg_lines = min(6, max(1, int(self.msg.ltext.count('\n') + 1 + len(self.msg.ltext) / 34.0)))
         mh = msg_lines * sp(15) * 1.5 if self.msg.ltext else 0
         eh = (self.extra.height + dp(10)) if self.extra is not None else 0
-        ph = pad + dp(32) + dp(8) + mh + eh + dp(14) + dp(46) + dp(10)
+        ph = pad + dp(32) + dp(10) + mh + eh + dp(20) + dp(48) + dp(18)
         px = (self.x + self.width / 2.0) - pw / 2.0
         if self.extra is not None:
             py = (self.y + self.height) - dp(120) - ph       # keep clear of the keyboard
@@ -1482,7 +1586,7 @@ class Dialog(Overlay):
         y = py + ph - pad - dp(32)
         self.title.pos = (px + pad, y)
         self.title.size = (pw - 2 * pad, dp(32))
-        y -= dp(8) + mh
+        y -= dp(10) + mh
         self.msg.pos = (px + pad, y)
         self.msg.size = (pw - 2 * pad, mh)
         if self.extra is not None:
@@ -1490,13 +1594,23 @@ class Dialog(Overlay):
             self.extra.pos = (px + pad, y + dp(5))
             self.extra.width = pw - 2 * pad
         n = len(self.btns)
-        bw = (pw - 2 * pad - dp(8) * (n - 1)) / float(n)
+        gap = dp(10)
+        bw = (pw - 2 * pad - gap * (n - 1)) / float(n)
         for i, b in enumerate(self.btns):
             # first button on the right
-            b.pos = (px + pw - pad - (i + 1) * bw - i * dp(8), py + dp(10))
-            b.size = (bw, dp(46))
+            b.pos = (px + pw - pad - (i + 1) * bw - i * gap, py + dp(18))
+            b.size = (bw, dp(48))
             b.lbl.pos = b.pos
             b.lbl.size = b.size
+            b.canvas.before.clear()
+            with b.canvas.before:
+                if b.kind == 'primary':
+                    Color(*ACCENT)
+                elif b.kind == 'danger':
+                    Color(*DANGER)
+                else:
+                    Color(*SURFACE2)
+                RoundedRectangle(pos=b.pos, size=b.size, radius=[dp(14)])
 
 
 class PromptDialog(Dialog):
@@ -1561,15 +1675,20 @@ class Toast(Widget):
     def show(self, text, parent_size, bottom=dp(96)):
         W = parent_size[0]
         w = min(W - dp(40), dp(380))
-        self.size = (w, dp(54) if len(text) > 32 else dp(42))
+        self.size = (w, dp(58) if len(text) > 32 else dp(46))
         self.pos = ((W - w) / 2.0, bottom)
         self.lbl.ltext = text
-        self.lbl.pos = (self.x + dp(12), self.y)
-        self.lbl.size = (self.width - dp(24), self.height)
+        self.lbl.pos = (self.x + dp(16), self.y)
+        self.lbl.size = (self.width - dp(32), self.height)
         self.canvas.before.clear()
         with self.canvas.before:
-            Color(0.2, 0.2, 0.22, 0.97)
-            RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(21)])
+            Color(0, 0, 0, 0.35)                                    # shadow
+            RoundedRectangle(pos=(self.x, self.y - dp(2)), size=(self.width, self.height), radius=[dp(23)])
+            Color(0.15, 0.155, 0.185, 0.98)
+            RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(23)])
+            Color(1, 1, 1, 0.08)
+            Line(rounded_rectangle=(self.x + 0.5, self.y + 0.5, self.width - 1, self.height - 1, dp(23)),
+                 width=1)
         self.opacity = 1
         if self._ev:
             self._ev.cancel()
@@ -1577,3 +1696,212 @@ class Toast(Widget):
 
     def _hide(self, dt):
         self.opacity = 0
+
+
+# ---------------------------------------------------------------------------
+# small building blocks used by the player and the settings
+# ---------------------------------------------------------------------------
+class Badge(Widget):
+    """Dark rounded chip with an optional icon and a short text; sizes itself to the text."""
+
+    def __init__(self, font=None, pulse=False, **kw):
+        kw.setdefault('size_hint', (None, None))
+        super(Badge, self).__init__(**kw)
+        self.pulse = pulse
+        self.icon = Icon(name='play', size=(0, 0))
+        self.lbl = Txt(halign='center', align_mode='center', font_size=font or sp(15), bold=True,
+                       size_hint=(None, None))
+        self.add_widget(self.icon)
+        self.add_widget(self.lbl)
+        self.opacity = 0
+        self._isz = 0
+        self._tw = 0
+        self._ev = None
+        self._pulse_ev = None
+        self.bind(pos=self._lay, size=self._lay)
+
+    def show(self, text, center, icon=None, duration=0.0, h=None):
+        self.lbl.ltext = text
+        tw = self.lbl.text_width() + dp(6)
+        on = icon is not None
+        if on:
+            self.icon.name = icon
+        isz = dp(20) if on else 0
+        self.icon.size = (isz, isz)
+        pad = dp(16)
+        h = h or dp(40)
+        w = pad * 2 + tw + ((isz + dp(8)) if on else 0)
+        self._isz, self._tw = isz, tw
+        self.size = (max(w, h), h)
+        self.center = center
+        self.opacity = 1
+        self.icon.opacity = 1
+        if self._ev:
+            self._ev.cancel()
+            self._ev = None
+        if duration:
+            self._ev = Clock.schedule_once(lambda dt: self.hide(), duration)
+        if self.pulse and on and self._pulse_ev is None:
+            self._pulse_ev = Clock.schedule_interval(self._beat, 0.4)
+        self._lay()
+
+    def _beat(self, dt):
+        self.icon.opacity = 0.4 if self.icon.opacity > 0.7 else 1.0
+
+    def hide(self):
+        self.opacity = 0
+        if self._ev:
+            self._ev.cancel()
+            self._ev = None
+        if self._pulse_ev:
+            self._pulse_ev.cancel()
+            self._pulse_ev = None
+
+    def _lay(self, *a):
+        self.canvas.before.clear()
+        h = self.height
+        with self.canvas.before:
+            Color(*SCRIM)
+            RoundedRectangle(pos=self.pos, size=self.size, radius=[h / 2.0])
+            Color(1, 1, 1, 0.10)
+            Line(rounded_rectangle=(self.x + 0.5, self.y + 0.5, self.width - 1, h - 1, h / 2.0), width=1)
+        pad = dp(16)
+        cy = self.y + h / 2.0
+        if self._isz:
+            self.icon.center = (self.x + pad + self._isz / 2.0, cy)
+            self.lbl.pos = (self.x + pad + self._isz + dp(8), self.y)
+            self.lbl.size = (self._tw, h)
+        else:
+            self.lbl.pos = (self.x + pad, self.y)
+            self.lbl.size = (max(2, self.width - 2 * pad), h)
+
+    def on_touch_down(self, touch):
+        return False
+
+
+class Tag(Widget):
+    """Small dark label that hugs its text (duration on a thumbnail, ...)."""
+
+    def __init__(self, font=None, **kw):
+        kw.setdefault('size_hint', (None, None))
+        super(Tag, self).__init__(**kw)
+        self.lbl = Txt(halign='center', bold=True, font_size=font or sp(11), size_hint=(None, None))
+        self.add_widget(self.lbl)
+        self.bind(pos=self._lay, size=self._lay)
+
+    @property
+    def ltext(self):
+        return self.lbl.ltext
+
+    def set_text(self, text):
+        self.lbl.ltext = text
+        self.width = (self.lbl.text_width() + dp(12)) if text else 0
+        self.height = dp(18) if text else 0
+        self._lay()
+
+    def _lay(self, *a):
+        self.canvas.before.clear()
+        self.lbl.pos = self.pos
+        self.lbl.size = self.size
+        if self.width < 2:
+            return
+        with self.canvas.before:
+            Color(0, 0, 0, 0.78)
+            RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(5)])
+
+
+class StepButton(Tap):
+    """Round arrow with the number of seconds inside it (the usual -10 / +10 buttons)."""
+
+    def __init__(self, direction, callback=None, value=10, **kw):
+        kw.setdefault('size_hint', (None, None))
+        kw.setdefault('size', (dp(52), dp(52)))
+        super(StepButton, self).__init__(callback=callback, **kw)
+        self.icon = Icon(name='step_fwd' if direction == 'fwd' else 'step_back', size=(dp(36), dp(36)),
+                         stroke=1.7)
+        self.num = Txt(ltext=str(int(value)), halign='center', align_mode='center', bold=True,
+                       font_size=sp(10), size_hint=(None, None))
+        self.add_widget(self.icon)
+        self.add_widget(self.num)
+        self.bind(pos=self._sync, size=self._sync)
+        self._sync()
+
+    def set_value(self, n):
+        self.num.ltext = str(int(n))
+
+    def _sync(self, *a):
+        cx, cy = self.x + self.width / 2.0, self.y + self.height / 2.0
+        self.icon.center = (cx, cy)
+        self.num.size = (dp(24), dp(14))
+        self.num.center = (cx, cy - 1.2 * self.icon.width / 24.0)
+
+    def _set_pressed(self, v):
+        self.pressed = v
+        self.icon.opacity = 0.55 if v else 1.0
+        self.num.opacity = 0.55 if v else 1.0
+
+
+class EmptyState(Widget):
+    """A muted icon over a short message, shown when a list has nothing to show."""
+    ltext = StringProperty('')
+
+    def __init__(self, icon='folder_play', **kw):
+        kw.setdefault('size_hint', (None, None))
+        super(EmptyState, self).__init__(**kw)
+        self.icon = Icon(name=icon, size=(dp(60), dp(60)), color=[1, 1, 1, 0.2], stroke=1.2)
+        self.lbl = Txt(halign='center', align_mode='center', color=SUB, font_size=sp(16), nlines=3,
+                       size_hint=(None, None))
+        self.add_widget(self.icon)
+        self.add_widget(self.lbl)
+        self.bind(pos=self._lay, size=self._lay, ltext=self._text)
+        self._text()
+
+    def _text(self, *a):
+        self.lbl.ltext = self.ltext
+        self.opacity = 1 if self.ltext else 0
+        self._lay()
+
+    def _lay(self, *a):
+        self.lbl.pos = self.pos
+        self.lbl.size = self.size
+        self.icon.center = (self.x + self.width / 2.0, (self.y + self.height) + dp(38))
+
+    def on_touch_down(self, touch):
+        return False
+
+
+class Group(BoxLayout):
+    """A rounded card holding rows that are separated by hairlines (settings)."""
+
+    def __init__(self, **kw):
+        kw.setdefault('orientation', 'vertical')
+        kw.setdefault('size_hint', (1, None))
+        super(Group, self).__init__(**kw)
+        self.bind(minimum_height=self.setter('height'))
+        self._rows = []
+        with self.canvas.before:
+            Color(*SURFACE)
+            self._bg = RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(20)])
+        self.bind(pos=self._geo, size=self._geo)
+
+    def add_row(self, w):
+        w.size_hint = (1, None)
+        self._rows.append(w)
+        self.add_widget(w)
+        n, r = len(self._rows), dp(20)
+        for i, row in enumerate(self._rows):
+            if isinstance(row, Tap):
+                top, bot = (r if i == 0 else 0), (r if i == n - 1 else 0)
+                row.fb_radius = [top, top, bot, bot]
+        self._geo()
+
+    def _geo(self, *a):
+        self._bg.pos = self.pos
+        self._bg.size = self.size
+        self.canvas.after.clear()
+        with self.canvas.after:
+            Color(*DIVIDER)
+            y = self.y + self.height
+            for row in self._rows[:-1]:
+                y -= row.height
+                Rectangle(pos=(self.x + dp(20), y - 0.5), size=(max(0, self.width - dp(40)), 1))

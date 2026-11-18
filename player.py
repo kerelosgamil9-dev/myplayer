@@ -16,7 +16,7 @@ import random
 import time
 
 from kivy.clock import Clock
-from kivy.graphics import Color, Rectangle, RoundedRectangle
+from kivy.graphics import Color, Ellipse, Rectangle, RoundedRectangle
 from kivy.metrics import dp, sp
 from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.widget import Widget
@@ -25,8 +25,8 @@ import bridge
 import core
 from engine import Engine
 from screens import Page
-from widgets import (ACCENT, SUB, ChipsRow, Dialog, Icon, IconButton, MenuSheet, SeekBar,
-                     SheetLabel, SheetRow, SheetTitle, Tap, Txt)
+from widgets import (ACCENT, SCRIM, SUB, Badge, ChipsRow, Dialog, Icon, IconButton, MenuSheet, SeekBar,
+                     SheetLabel, SheetRow, SheetTitle, StepButton, Tap, Txt)
 
 ASPECTS = ['fit', 'fill', 'stretch', '16:9', '4:3']
 ASPECT_LABELS = {'fit': 'ملائم للشاشة', 'fill': 'ملء الشاشة (قص)', 'stretch': 'تمديد',
@@ -37,46 +37,223 @@ REPEAT_LABELS = {'off': 'بدون تكرار', 'one': 'تكرار الفيديو
 SLEEP_OPTIONS = [0, 15, 30, 45, 60, 90]
 
 
-class Pill(Widget):
-    """Small rounded dark label that appears for a moment."""
+class Feedback(Widget):
+    """Base of the little animations drawn over the video.  They never take touches, stay for a
+    moment and then fade out."""
 
     def __init__(self, **kw):
         kw.setdefault('size_hint', (None, None))
-        super(Pill, self).__init__(**kw)
-        self.lbl = Txt(halign='center', font_size=sp(17), bold=True, size_hint=(None, None))
-        self.add_widget(self.lbl)
+        super(Feedback, self).__init__(**kw)
         self.opacity = 0
-        self._ev = None
+        self._hold = None
+        self._fade = None
         self.bind(pos=self._lay, size=self._lay)
 
-    def show(self, text, center, w=dp(150), h=dp(44), duration=0.0):
-        self.size = (w, h)
-        self.center = center
-        self.lbl.ltext = text
-        self.opacity = 1
-        if self._ev:
-            self._ev.cancel()
-            self._ev = None
-        if duration:
-            self._ev = Clock.schedule_once(lambda dt: self.hide(), duration)
-        self._lay()
-
-    def hide(self):
-        self.opacity = 0
-
     def _lay(self, *a):
-        self.canvas.before.clear()
-        with self.canvas.before:
-            Color(0, 0, 0, 0.72)
-            RoundedRectangle(pos=self.pos, size=self.size, radius=[self.height / 2.0])
-        self.lbl.pos = self.pos
-        self.lbl.size = self.size
+        pass
 
     def on_touch_down(self, touch):
         return False
 
+    def on_touch_move(self, touch):
+        return False
+
+    def on_touch_up(self, touch):
+        return False
+
+    def _appear(self):
+        self._cancel()
+        self.opacity = 1
+
+    def _cancel(self):
+        for ev in (self._hold, self._fade):
+            if ev is not None:
+                ev.cancel()
+        self._hold = self._fade = None
+
+    def _later(self, seconds):
+        if self._hold is not None:
+            self._hold.cancel()
+        self._hold = Clock.schedule_once(self._start_fade, seconds)
+
+    def _start_fade(self, dt):
+        self._hold = None
+        if self._fade is None:
+            self._fade = Clock.schedule_interval(self._step, 0)
+
+    def _step(self, dt):
+        self.opacity = max(0.0, self.opacity - min(dt, 0.05) / 0.22)
+        if self.opacity <= 0.0 and self._fade is not None:
+            self._fade.cancel()
+            self._fade = None
+
+    def hide(self):
+        self._cancel()
+        self.opacity = 0
+
+
+class SideFeedback(Feedback):
+    """Double tap on the left / right third: that third of the screen lights up softly, with the
+    arrows and the seconds skipped so far (tapping again adds up: 10, 20, 30 ...)."""
+
+    def __init__(self, side, **kw):
+        super(SideFeedback, self).__init__(**kw)
+        self.side = side                        # 'back' = left third, 'fwd' = right third
+        self.icon = Icon(name='fwd' if side == 'fwd' else 'rew', size=(dp(32), dp(32)))
+        self.lbl = Txt(halign='center', align_mode='center', bold=True, font_size=sp(15),
+                       size_hint=(None, None))
+        self.add_widget(self.icon)
+        self.add_widget(self.lbl)
+        self._total = 0
+        self._last = 0.0
+
+    def bump(self, secs, area):
+        now = time.time()
+        if now - self._last > 1.0 or self.opacity <= 0.01:
+            self._total = 0
+        self._last = now
+        self._total += abs(int(secs))
+        self.lbl.ltext = '%d ثانية' % self._total
+        self.pos = (area[0], area[1])
+        self.size = (area[2], area[3])
+        self._lay()
+        self._appear()
+        self._later(0.65)
+
+    def _lay(self, *a):
+        x, y, w, h = self.x, self.y, self.width, self.height
+        self.canvas.before.clear()
+        if w < 2 or h < 2:
+            return
+        r = min(w * 0.85, h * 0.5)
+        rad = [0, r, r, 0] if self.side == 'back' else [r, 0, 0, r]
+        with self.canvas.before:
+            Color(1, 1, 1, 0.12)
+            RoundedRectangle(pos=(x, y), size=(w, h), radius=rad)
+        cx, cy = x + w / 2.0, y + h / 2.0
+        self.icon.center = (cx, cy + dp(18))
+        self.lbl.pos = (x, cy - dp(36))
+        self.lbl.size = (w, dp(28))
+
+
+class CenterFeedback(Feedback):
+    """Play / pause symbol that pops up in the middle after a double tap on the centre."""
+
+    def __init__(self, **kw):
+        super(CenterFeedback, self).__init__(**kw)
+        self.icon = Icon(name='play', size=(dp(38), dp(38)))
+        self.add_widget(self.icon)
+
+    def flash(self, name, center):
+        self.icon.name = name
+        d = dp(78)
+        self.size = (d, d)
+        self.pos = (center[0] - d / 2.0, center[1] - d / 2.0)
+        self._lay()
+        self._appear()
+        self._later(0.3)
+
+    def _lay(self, *a):
+        self.canvas.before.clear()
+        if self.width < 2:
+            return
+        with self.canvas.before:
+            Color(*SCRIM)
+            Ellipse(pos=self.pos, size=self.size)
+        self.icon.center = (self.x + self.width / 2.0, self.y + self.height / 2.0)
+
+
+class LevelHud(Feedback):
+    """Vertical bar on the screen edge for brightness / volume while the finger slides."""
+
+    def __init__(self, **kw):
+        kw.setdefault('size', (dp(58), dp(196)))
+        super(LevelHud, self).__init__(**kw)
+        self.value = 0.0
+        self.icon = Icon(name='brightness', size=(dp(24), dp(24)))
+        self.lbl = Txt(halign='center', align_mode='center', bold=True, font_size=sp(13),
+                       size_hint=(None, None))
+        self.add_widget(self.icon)
+        self.add_widget(self.lbl)
+
+    def show(self, kind, value, center):
+        self.value = max(0.0, min(1.0, value))
+        self.icon.name = 'brightness' if kind == 'brightness' else (
+            'volume_mute' if self.value <= 0.001 else 'volume')
+        self.lbl.ltext = '%d' % int(round(self.value * 100))
+        self.pos = (center[0] - self.width / 2.0, center[1] - self.height / 2.0)
+        self._lay()
+        self._appear()
+
+    def release(self):
+        self._later(0.5)
+
+    def _lay(self, *a):
+        x, y, w, h = self.x, self.y, self.width, self.height
+        self.canvas.before.clear()
+        if w < 2 or h < 2:
+            return
+        cx = x + w / 2.0
+        tw = dp(6)
+        ty0 = y + dp(42)
+        th = h - dp(42) - dp(54)
+        with self.canvas.before:
+            Color(*SCRIM)
+            RoundedRectangle(pos=(x, y), size=(w, h), radius=[w / 2.0])
+            Color(1, 1, 1, 0.22)
+            RoundedRectangle(pos=(cx - tw / 2.0, ty0), size=(tw, th), radius=[tw / 2.0])
+            Color(*ACCENT)
+            RoundedRectangle(pos=(cx - tw / 2.0, ty0), size=(tw, max(tw, th * self.value)), radius=[tw / 2.0])
+        self.icon.center = (cx, y + h - dp(28))
+        self.lbl.pos = (x, y + dp(8))
+        self.lbl.size = (w, dp(26))
+
+
+class SeekCard(Feedback):
+    """While swiping sideways: where the video would jump to, and by how much."""
+
+    def __init__(self, **kw):
+        kw.setdefault('size', (dp(176), dp(92)))
+        super(SeekCard, self).__init__(**kw)
+        self.frac = 0.0
+        self.time = Txt(halign='center', align_mode='center', bold=True, font_size=sp(27),
+                        size_hint=(None, None))
+        self.delta = Txt(halign='center', align_mode='center', font_size=sp(14), size_hint=(None, None))
+        self.add_widget(self.time)
+        self.add_widget(self.delta)
+
+    def show(self, target, base, dur, center):
+        d = int(target - base)
+        self.time.ltext = core.fmt_time(target)
+        self.delta.ltext = '%s%d ثانية' % ('+' if d >= 0 else '−', abs(d))
+        self.delta.color = list(ACCENT) if d >= 0 else [0.86, 0.88, 0.93, 1]
+        self.frac = max(0.0, min(1.0, target / dur)) if dur and dur < 1e8 else 0.0
+        self.pos = (center[0] - self.width / 2.0, center[1] - self.height / 2.0)
+        self._lay()
+        self._appear()
+
+    def _lay(self, *a):
+        x, y, w, h = self.x, self.y, self.width, self.height
+        self.canvas.before.clear()
+        if w < 2 or h < 2:
+            return
+        bx, bw = x + dp(20), w - dp(40)
+        with self.canvas.before:
+            Color(*SCRIM)
+            RoundedRectangle(pos=(x, y), size=(w, h), radius=[dp(20)])
+            Color(1, 1, 1, 0.22)
+            RoundedRectangle(pos=(bx, y + dp(14)), size=(bw, dp(4)), radius=[dp(2)])
+            Color(*ACCENT)
+            RoundedRectangle(pos=(bx, y + dp(14)), size=(max(dp(4), bw * self.frac), dp(4)), radius=[dp(2)])
+        self.time.pos = (x, y + h - dp(46))
+        self.time.size = (w, dp(40))
+        self.delta.pos = (x, y + dp(24))
+        self.delta.size = (w, dp(26))
+
 
 class PlayerPage(Page):
+    BGCOLOR = (0, 0, 0, 1)                   # the bars around the picture are pure black
+
     def __init__(self, app, keys, index, cid=None, **kw):
         super(PlayerPage, self).__init__(app, **kw)
         self.lib = app.lib
@@ -124,28 +301,29 @@ class PlayerPage(Page):
         self.ctl = FloatLayout(size_hint=(1, 1))
         self.add_widget(self.ctl)
         self.btn_back = IconButton('back', callback=lambda w: self.app.root.back())
-        self.title = Txt(font_size=sp(16), align_mode='auto', size_hint=(None, None), bold=True)
+        self.title = Txt(font_size=sp(16.5), align_mode='auto', size_hint=(None, None), bold=True)
+        self.qinfo = Txt(font_size=sp(12), color=(1, 1, 1, 0.66), align_mode='left', size_hint=(None, None))
         self.btn_cc = IconButton('subtitle', callback=lambda w: self.subtitle_menu())
         self.btn_rot = IconButton('rotate', callback=lambda w: self.rotate())
         self.btn_more = IconButton('dots', callback=lambda w: self.main_menu())
-        self.cur = Txt(font_size=sp(13), halign='left', size_hint=(None, None))
-        self.dur = Txt(font_size=sp(13), halign='right', size_hint=(None, None))
+        self.cur = Txt(font_size=sp(13), halign='left', bold=True, size_hint=(None, None))
+        self.dur = Txt(font_size=sp(13), halign='right', color=(1, 1, 1, 0.72), size_hint=(None, None))
         self.seek = SeekBar(on_start=self._seek_start, on_move=self._seek_move, on_end=self._seek_end,
                             size_hint=(None, None), size=(dp(100), dp(36)))
         self.btn_lock = IconButton('unlock', callback=lambda w: self.set_lock(True))
         self.btn_prev = IconButton('prev', callback=lambda w: self.prev())
-        self.btn_rew = IconButton('rew', callback=lambda w: self.skip(-self._step()))
-        self.btn_play = IconButton('pause', callback=lambda w: self.toggle_play(), icon_size=dp(38),
-                                   size=(dp(60), dp(60)))
-        self.btn_fwd = IconButton('fwd', callback=lambda w: self.skip(self._step()))
+        self.btn_rew = StepButton('back', callback=lambda w: self.skip(-self._step()), value=self._step())
+        self.btn_play = IconButton('pause', callback=lambda w: self.toggle_play(), icon_size=dp(34),
+                                   size=(dp(64), dp(64)), bg=(1, 1, 1, 0.16))
+        self.btn_fwd = StepButton('fwd', callback=lambda w: self.skip(self._step()), value=self._step())
         self.btn_next = IconButton('next', callback=lambda w: self.next())
-        for b in (self.btn_prev, self.btn_rew, self.btn_fwd, self.btn_next):
+        for b in (self.btn_prev, self.btn_next):
             b.size = (dp(48), dp(48))
-            b.icon.size = (dp(26), dp(26))
+            b.icon.size = (dp(28), dp(28))
         self.btn_aspect = IconButton('aspect', callback=lambda w: self.cycle_aspect())
         self.btn_unlock = IconButton('lock', color=ACCENT, callback=lambda w: self.set_lock(False),
-                                     size=(dp(56), dp(56)))
-        for w in (self.btn_back, self.title, self.btn_cc, self.btn_rot, self.btn_more, self.cur, self.dur,
+                                     size=(dp(56), dp(56)), bg=SCRIM)
+        for w in (self.btn_back, self.title, self.qinfo, self.btn_cc, self.btn_rot, self.btn_more, self.cur, self.dur,
                   self.seek, self.btn_lock, self.btn_prev, self.btn_rew, self.btn_play, self.btn_fwd,
                   self.btn_next, self.btn_aspect):
             self.ctl.add_widget(w)
@@ -153,11 +331,16 @@ class PlayerPage(Page):
                            nlines=2, keep_nl=True, size_hint=(None, None), outline_width=dp(2),
                            outline_color=(0, 0, 0, 1), bold=True)
         self.add_widget(self.sub_lbl)
-        self.fb = Pill()
-        self.hud = Pill()
-        self.speed_tag = Pill()
-        self.hold_pill = Pill()
-        for w in (self.fb, self.hud, self.speed_tag, self.hold_pill, self.btn_unlock):
+        self.fb = Badge()                                   # short messages (aspect ratio, +10 s from a button)
+        self.speed_tag = Badge(font=sp(14))                 # permanent speed other than 1x
+        self.hold_pill = Badge(pulse=True)                  # the 2x while the finger is held down
+        self.bubble = Badge(font=sp(14))                    # time above the seek bar knob
+        self.step_fb = {'back': SideFeedback('back'), 'fwd': SideFeedback('fwd')}
+        self.center_fb = CenterFeedback()
+        self.level = LevelHud()
+        self.seek_card = SeekCard()
+        for w in (self.step_fb['back'], self.step_fb['fwd'], self.center_fb, self.seek_card, self.level,
+                  self.fb, self.speed_tag, self.hold_pill, self.bubble, self.btn_unlock):
             self.add_widget(w)
         self.btn_unlock.opacity = 0
         self.bind(pos=self._lay, size=self._lay)
@@ -250,6 +433,8 @@ class PlayerPage(Page):
         self._ended = False
         self._oriented = False
         self.title.ltext = self.lib.title(key)
+        self.qinfo.ltext = ('%d / %d' % (self.cursor + 1, len(self.queue))) if len(self.queue) > 1 else ''
+        self.qinfo.align_mode = 'right' if core.has_arabic(self.title.ltext) else 'left'
         if start is None:
             start = self.lib.resume_pos(key) if self.store.setting('resume') else 0.0
         self.lib.mark_started(key)
@@ -354,14 +539,21 @@ class PlayerPage(Page):
     def _sync_play_icon(self):
         self.btn_play.set_icon('play' if self.engine.paused else 'pause')
 
-    def skip(self, delta, show=True):
+    def skip(self, delta, show=True, side=None):
         pos = self.engine.position
         dur = self.engine.duration or 1e9
         target = max(0.0, min(dur - 0.5, pos + delta))
         self.engine.seek(target)
         self._ended = False
         if show:
-            self.fb.show('%s%d' % ('+' if delta > 0 else '-', abs(int(delta))), self._center(), w=dp(96), duration=0.7)
+            if side in self.step_fb:
+                W, H = self.size
+                x = self.x if side == 'back' else self.x + W * 2.0 / 3.0
+                fh = min(H, max(dp(260), W / 3.0 * 1.6))      # not a full-height column in portrait
+                self.step_fb[side].bump(delta, (x, self.y + (H - fh) / 2.0, W / 3.0, fh))
+            else:
+                self.fb.show('%s%d ث' % ('+' if delta > 0 else '−', abs(int(delta))), self._center(),
+                             icon='step_fwd' if delta > 0 else 'step_back', duration=0.7)
         self.show_controls(True)
 
     def set_speed(self, s, say=True):
@@ -375,8 +567,8 @@ class PlayerPage(Page):
     def _sync_speed_tag(self):
         if abs(self.speed - 1.0) > 1e-6 and not self.hold_active:
             self.speed_tag.show(core.fmt_speed(self.speed),
-                                ((self.x + self.width / 2.0), (self.y + self.height) - dp(86)), w=dp(70), h=dp(30))
-            self.speed_tag.lbl.font_size = sp(14)
+                                ((self.x + self.width / 2.0), (self.y + self.height) - dp(86)),
+                                icon='speed', h=dp(34))
         else:
             self.speed_tag.hide()
 
@@ -389,7 +581,7 @@ class PlayerPage(Page):
         self.aspect = ASPECTS[i]
         self.store.set_setting('aspect', self.aspect)
         self._place_video()
-        self.fb.show(ASPECT_LABELS[self.aspect], self._center(), w=dp(190), duration=0.9)
+        self.fb.show(ASPECT_LABELS[self.aspect], self._center(), icon='aspect', duration=0.9)
 
     def set_lock(self, on):
         self.locked = bool(on)
@@ -420,6 +612,8 @@ class PlayerPage(Page):
         self._lay()
         if show:
             self._update_time_ui(self.engine.position, force=True)
+            self.btn_rew.set_value(self._step())
+            self.btn_fwd.set_value(self._step())
         if show and not self.engine.paused and not self.seeking:
             self._hide_ev = Clock.schedule_once(lambda dt: self.show_controls(False), 3.8)
 
@@ -437,14 +631,17 @@ class PlayerPage(Page):
         self.seeking = True
         if self._hide_ev:
             self._hide_ev.cancel()
+        self._seek_move(v)
 
     def _seek_move(self, v):
         d = self.engine.duration
         if d:
             self.cur.ltext = core.fmt_time(v * d)
+            self.bubble.show(core.fmt_time(v * d), (self.seek.thumb_x(), self.seek.y + dp(54)), h=dp(32))
 
     def _seek_end(self, v):
         self.seeking = False
+        self.bubble.hide()
         d = self.engine.duration
         if d:
             self.engine.seek(v * d, accurate=True)
@@ -586,13 +783,13 @@ class PlayerPage(Page):
         x0, y0 = self.pos
         land = W > H
         pad = dp(28) if land else dp(10)
-        top_h = dp(64)
-        bot_h = dp(124)
+        top_h = dp(66)
+        bot_h = dp(138)
         self.ctl.canvas.before.clear()
         if not hasattr(self, '_grad'):
             from kivy.graphics.texture import Texture
             t = Texture.create(size=(1, 2), colorfmt='rgba')
-            t.blit_buffer(bytes([0, 0, 0, 0, 0, 0, 0, 215]), colorfmt='rgba', bufferfmt='ubyte')
+            t.blit_buffer(bytes([0, 0, 0, 0, 0, 0, 0, 205]), colorfmt='rgba', bufferfmt='ubyte')
             t.mag_filter = 'linear'
             self._grad = t
         with self.ctl.canvas.before:
@@ -600,38 +797,51 @@ class PlayerPage(Page):
             Rectangle(pos=(x0, y0), size=(W, bot_h + dp(30)), texture=self._grad,
                       tex_coords=(0, 1, 1, 1, 1, 0, 0, 0))
             Rectangle(pos=(x0, y0 + H - top_h - dp(20)), size=(W, top_h + dp(20)), texture=self._grad)
-        # top bar: back on the right, title, then cc / rotate / menu on the left
+        # top bar: back on the right, title (+ position in the queue), then cc / rotate / menu on the left
         top = y0 + H - top_h
-        self.btn_back.pos = (x0 + W - pad - dp(48), top + dp(8))
-        self.btn_more.pos = (x0 + pad, top + dp(8))
-        self.btn_rot.pos = (self.btn_more.x + dp(46), top + dp(8))
-        self.btn_cc.pos = (self.btn_rot.x + dp(46), top + dp(8))
-        tl = self.btn_cc.x + dp(48)
-        self.title.pos = (tl, top + dp(4))
-        self.title.size = (max(10, self.btn_back.x - tl - dp(6)), top_h - dp(8))
+        self.btn_back.pos = (x0 + W - pad - dp(48), top + dp(9))
+        self.btn_more.pos = (x0 + pad, top + dp(9))
+        self.btn_rot.pos = (self.btn_more.x + dp(46), top + dp(9))
+        self.btn_cc.pos = (self.btn_rot.x + dp(46), top + dp(9))
+        tl = self.btn_cc.x + dp(50)
+        tw = max(10, self.btn_back.x - tl - dp(6))
+        if self.qinfo.ltext:
+            self.title.pos = (tl, top + dp(30))
+            self.title.size = (tw, dp(28))
+            self.qinfo.pos = (tl, top + dp(10))
+            self.qinfo.size = (tw, dp(20))
+        else:
+            self.title.pos = (tl, top + dp(4))
+            self.title.size = (tw, top_h - dp(8))
+            self.qinfo.size = (0, 0)
         # seek row
-        sy = y0 + dp(66)
+        sy = y0 + dp(78)
         self.cur.pos = (x0 + pad + dp(4), sy)
         self.cur.size = (dp(54), dp(36))
         self.dur.pos = (x0 + W - pad - dp(58), sy)
         self.dur.size = (dp(54), dp(36))
         self.seek.pos = (x0 + pad + dp(54), sy)
         self.seek.size = (max(10, W - 2 * pad - dp(108)), dp(36))
-        # transport row (bottom, no backgrounds)
+        # transport row: lock | prev  -10  PLAY  +10  next | aspect
         ry = y0 + dp(8)
         cx = x0 + W / 2.0
-        play, mid, sd = dp(60), dp(48), dp(48)
-        gap = max(dp(2), min(dp(14), (W - 2 * pad - 2 * sd - play - 4 * mid) / 8.0))
+        narrow = W < dp(420)
+        play, st, mid, sd = (dp(60), dp(48), dp(44), dp(44)) if narrow else (dp(64), dp(52), dp(48), dp(48))
+        for b, d in ((self.btn_play, play), (self.btn_rew, st), (self.btn_fwd, st), (self.btn_prev, mid),
+                     (self.btn_next, mid), (self.btn_lock, sd), (self.btn_aspect, sd)):
+            b.size = (d, d)
+        gap = max(dp(2), min(dp(14), (W - 2 * pad - 2 * sd - play - 2 * st - 2 * mid) / 8.0))
+        cyr = ry + play / 2.0
         self.btn_play.pos = (cx - play / 2.0, ry)
-        self.btn_rew.pos = (self.btn_play.x - gap - mid, ry + dp(6))
-        self.btn_prev.pos = (self.btn_rew.x - gap - mid, ry + dp(6))
-        self.btn_fwd.pos = (self.btn_play.x + play + gap, ry + dp(6))
-        self.btn_next.pos = (self.btn_fwd.x + mid + gap, ry + dp(6))
-        self.btn_lock.pos = (x0 + pad, ry + dp(6))
-        self.btn_aspect.pos = (x0 + W - pad - sd, ry + dp(6))
+        self.btn_rew.pos = (self.btn_play.x - gap - st, cyr - st / 2.0)
+        self.btn_prev.pos = (self.btn_rew.x - gap - mid, cyr - mid / 2.0)
+        self.btn_fwd.pos = (self.btn_play.x + play + gap, cyr - st / 2.0)
+        self.btn_next.pos = (self.btn_fwd.x + st + gap, cyr - mid / 2.0)
+        self.btn_lock.pos = (x0 + pad, cyr - sd / 2.0)
+        self.btn_aspect.pos = (x0 + W - pad - sd, cyr - sd / 2.0)
         self.btn_unlock.center = (x0 + pad + dp(34), y0 + H / 2.0)
         # subtitles
-        base = dp(140) if self.ctl_visible else dp(28)
+        base = dp(154) if self.ctl_visible else dp(28)
         self.sub_lbl.size = (W * 0.9, dp(110))
         self.sub_lbl.pos = (x0 + W * 0.05, y0 + base)
         self._place_video()
@@ -687,7 +897,8 @@ class PlayerPage(Page):
         hs = float(self.store.setting('hold_speed') or 2.0)
         self.speed_tag.hide()
         self.hold_pill.show(core.fmt_speed(hs),
-                            ((self.x + self.width / 2.0), (self.y + self.height) - dp(86)), w=dp(90), h=dp(36))
+                            ((self.x + self.width / 2.0), (self.y + self.height) - dp(86)), icon='fwd',
+                            h=dp(40))
         if self.store.setting('vibrate'):
             bridge.vibrate(15)
         if abs(hs - self.speed) > 1e-6:
@@ -723,20 +934,16 @@ class PlayerPage(Page):
                 delta = dx / dp(1) * 0.35
                 target = max(0.0, min(dur - 0.5, g['base'] + delta))
                 g['target'] = target
-                self.fb.show('%s%d ث\n%s' % ('+' if target >= g['base'] else '−',
-                                             abs(int(target - g['base'])), core.fmt_time(target)),
-                             self._center(), w=dp(130), h=dp(64))
+                self.seek_card.show(target, g['base'], dur, self._center())
             elif mode == 'bright':
                 v = max(0.02, min(1.0, g['base'] + dy / (self.height * 0.7)))
                 bridge.set_brightness(v)
                 self._brightness = v
-                self.hud.show('%d%%  سطوع' % int(v * 100),
-                              (self.x + dp(90), (self.y + self.height / 2.0)), w=dp(130), h=dp(40))
+                self.level.show('brightness', v, (self.x + dp(64), self.y + self.height / 2.0))
             elif mode == 'vol':
                 v = max(0.0, min(1.0, g['base'] + dy / (self.height * 0.7)))
                 bridge.set_volume(v)
-                self.hud.show('%d%%  صوت' % int(v * 100), ((self.x + self.width) - dp(90), (self.y + self.height / 2.0)),
-                              w=dp(130), h=dp(40))
+                self.level.show('volume', v, ((self.x + self.width) - dp(64), self.y + self.height / 2.0))
             return True
         return Page.on_touch_move(self, touch)
 
@@ -762,9 +969,9 @@ class PlayerPage(Page):
                 if 'target' in g:
                     self.engine.seek(g['target'])
                     self._ended = False
-                self.fb.hide()
+                self.seek_card.hide()
             elif mode in ('bright', 'vol'):
-                Clock.schedule_once(lambda dt: self.hud.hide(), 0.6)
+                self.level.release()
             elif not g['moved']:
                 self._tap(touch)
             return True
@@ -794,11 +1001,13 @@ class PlayerPage(Page):
     def _double(self, x):
         third = self.width / 3.0
         if x < self.x + third:
-            self.skip(-self._step())
+            self.skip(-self._step(), side='back')
         elif x > self.x + 2 * third:
-            self.skip(self._step())
+            self.skip(self._step(), side='fwd')
         else:
             self.toggle_play()
+            self.center_fb.flash('pause' if self.engine.paused else 'play',
+                                 (self.x + self.width / 2.0, self.y + self.height / 2.0))
 
     # ------------------------------------------------------------------ subtitles
     def _load_subs(self, path):
@@ -832,7 +1041,7 @@ class PlayerPage(Page):
                 rows.append(SheetRow(os.path.basename(p), icon='subtitle', checked=cur,
                                      callback=lambda w, p=p: pick(p)))
             if not self.sub_files:
-                rows.append(SheetLabel('لا توجد ملفات ترجمة (.srt / .vtt) بجوار الفيديو بنفس الاسم'))
+                rows.append(SheetLabel('لا توجد ملفات ترجمة (.srt / .vtt) بجوار الفيديو بنفس الاسم', muted=True))
             else:
                 rows.append(SheetLabel('تأخير الترجمة: %+.1f ث' % self.sub_delay))
                 rows.append(SheetRow('تأخير +0.5 ث', icon='plus', callback=lambda w: delay(0.5)))
