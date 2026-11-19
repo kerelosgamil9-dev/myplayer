@@ -837,7 +837,7 @@ class SettingsPane(FloatLayout):
         self.card('القوائم', [
             SheetRow('استعادة القوائم المحذوفة', icon='restore',
                      value=('%d' % n_back) if n_back else '', callback=lambda w: self.restore())])
-        box.add_widget(SheetLabel('Pro Player  •  تشغيل الفيديو بالسرعات والترتيب الذي تريده', muted=True))
+        box.add_widget(SheetLabel('Pro Player  •  بناء %s  •  %d' % (core.BUILD, int(self.sv.scroll_timeout)), muted=True))
 
     def pick_number(self, key, title, options, fmt):
         cur = self.S(key)

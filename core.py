@@ -278,6 +278,7 @@ def load_subtitle(path):
 # ---------------------------------------------------------------------------
 # persistence
 # ---------------------------------------------------------------------------
+BUILD = 'r4'                # shown at the bottom of the settings: tells which upload is installed
 MIN_RESUME = 3.0          # seconds: less than this watched = starts from zero, no progress bar
 
 

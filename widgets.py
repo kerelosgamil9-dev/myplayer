@@ -1333,7 +1333,25 @@ def make_scroll(**kw):
     kw.setdefault('bar_width', dp(3))
     kw.setdefault('scroll_distance', dp(7))
     kw.setdefault('scroll_timeout', 60000)       # effectively never: only a release hands the touch to a row
-    return ScrollView(**kw)
+    return SmoothScroll(**kw)
+
+
+class SmoothScroll(ScrollView):
+    """ScrollView that cannot get stuck in 'a touch is already being tracked' state.
+
+    Kivy hands a new touch straight to the rows (a press) when it still believes an older touch
+    is active; if that older touch's release was ever lost, every later drag starting on a row
+    would count as a press.  Here a tracked touch that has ended, or that has been silent for
+    two seconds while a new finger lands, is forgotten."""
+
+    def on_touch_down(self, touch):
+        t = getattr(self, '_touch', None)
+        if t and t is not touch:
+            ended = getattr(t, 'time_end', -1) != -1
+            silent = time.time() - getattr(t, 'time_update', time.time()) > 2.0     # no news for 2 s
+            if ended or silent:
+                self._touch = None
+        return super(SmoothScroll, self).on_touch_down(touch)
 
 
 class Overlay(FloatLayout):
