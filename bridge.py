@@ -412,7 +412,7 @@ def scan_videos_async(callback):
 # thumbnails
 # ---------------------------------------------------------------------------
 def thumb_path(app, video):
-    sig = '%s|%s|%s' % (video['path'], video.get('size', 0), video.get('modified', 0))
+    sig = '%s|%s|%s|v2' % (video['path'], video.get('size', 0), video.get('modified', 0))   # v2: no black frames
     h = hashlib.md5(sig.encode('utf-8', 'replace')).hexdigest()
     return os.path.join(cache_dir(app), h + '.jpg')
 
@@ -441,11 +441,44 @@ def _save_bitmap(bmp, out):
     return bool(ok)
 
 
+def _brightness(bmp):
+    """Average brightness (0-255) of a handful of pixels of a bitmap; -1 when it cannot be read."""
+    try:
+        w, h = bmp.getWidth(), bmp.getHeight()
+        if w < 2 or h < 2:
+            return -1.0
+        tot, n = 0.0, 0
+        for iy in range(1, 6):
+            for ix in range(1, 8):
+                p = int(bmp.getPixel(w * ix // 8, h * iy // 6))
+                tot += 0.299 * ((p >> 16) & 255) + 0.587 * ((p >> 8) & 255) + 0.114 * (p & 255)
+                n += 1
+        return tot / n
+    except Exception:
+        return -1.0
+
+
+DARK_LIMIT = 14.0            # a frame darker than this is a black screen, not a picture
+
+
 def _make_thumb_android(video, out):
-    """Try several ways to get a frame; returns True when a JPEG was written."""
+    """Try several ways to get a frame; returns True when a JPEG was written.  A black frame (the
+    first seconds of many episodes) is never accepted while a brighter one can be found."""
     path = video['path']
     duration = video.get('duration', 0)
     errors = []
+    best = [None, -2.0]                      # [bitmap, brightness] of the best frame seen so far
+
+    def consider(bmp):
+        """True when the frame is good enough to stop looking."""
+        if bmp is None:
+            return False
+        b = _brightness(bmp)
+        if b >= DARK_LIMIT or b < 0:
+            return _save_bitmap(bmp, out)
+        if b > best[1]:
+            best[0], best[1] = bmp, b
+        return False
     # 1) system thumbnail through the content uri (Android 10+)
     try:
         if video.get('id') and sdk_int() >= 29:
@@ -453,21 +486,29 @@ def _make_thumb_android(video, out):
             MS = autoclass('android.provider.MediaStore$Video$Media')
             Size = autoclass('android.util.Size')
             uri = ContentUris.withAppendedId(MS.EXTERNAL_CONTENT_URI, int(video['id']))
-            bmp = _activity().getContentResolver().loadThumbnail(uri, Size(480, 270), None)
-            if bmp is not None and _save_bitmap(bmp, out):
+            if consider(_activity().getContentResolver().loadThumbnail(uri, Size(480, 270), None)):
                 return True
     except Exception as e:
         errors.append('loadThumbnail: %s' % e)
-    # 2) frame grabber
+    # 2) frame grabber: several moments, the first bright one wins
     MMR = autoclass('android.media.MediaMetadataRetriever')
     mmr = MMR()
     try:
         mmr.setDataSource(path)
-        t = int(min(max(duration * 0.1, 1.0), 10.0) * 1000000) if duration else 1000000
-        bmp = mmr.getFrameAtTime(t, 2)
-        if bmp is None:
-            bmp = mmr.getFrameAtTime(-1)
-        if bmp is not None and _save_bitmap(bmp, out):
+        if duration:
+            times = [min(max(duration * f, 1.0), duration * 0.95) for f in (0.1, 0.25, 0.4, 0.55)]
+        else:
+            times = [1.0, 5.0, 15.0, 40.0]
+        for t in times:
+            try:
+                if consider(mmr.getFrameAtTime(int(t * 1000000), 2)):
+                    return True
+            except Exception as e:
+                errors.append('frame %.0f: %s' % (t, e))
+        if best[0] is None:
+            if consider(mmr.getFrameAtTime(-1)):
+                return True
+        if best[0] is not None and _save_bitmap(best[0], out):      # every frame was dark: keep the best
             return True
         errors.append('no frame')
     except Exception as e:
@@ -475,6 +516,12 @@ def _make_thumb_android(video, out):
     finally:
         try:
             mmr.release()
+        except Exception:
+            pass
+    if best[0] is not None and not os.path.exists(out):
+        try:
+            if _save_bitmap(best[0], out):
+                return True
         except Exception:
             pass
     LAST_THUMB_ERROR[0] = '; '.join(errors)[:300]
@@ -632,6 +679,51 @@ def delete_videos(videos, callback):
     except Exception:
         log(traceback.format_exc())
         Clock.schedule_once(lambda dt: callback([]), 0)
+
+
+# ---------------------------------------------------------------------------
+# sharing
+# ---------------------------------------------------------------------------
+def share_videos(videos):
+    """Open the system share sheet with the given videos.  Returns how many were handed over
+    (0 when sharing is not possible here)."""
+    vids = [v for v in videos if v.get('id')]
+    if not ANDROID or not vids:
+        return 0
+    try:
+        _share_ui(vids)
+        return len(vids)
+    except Exception:
+        log(traceback.format_exc())
+        return 0
+
+
+@run_on_ui_thread
+def _share_ui(vids):
+    try:
+        Intent = autoclass('android.content.Intent')
+        ContentUris = autoclass('android.content.ContentUris')
+        MS = autoclass('android.provider.MediaStore$Video$Media')
+        Parcelable = autoclass('android.os.Parcelable')
+        from jnius import cast
+        uris = [ContentUris.withAppendedId(MS.EXTERNAL_CONTENT_URI, int(v['id'])) for v in vids]
+        if len(uris) == 1:
+            it = Intent(Intent.ACTION_SEND)
+            it.setType('video/*')
+            it.putExtra(Intent.EXTRA_STREAM, cast(Parcelable, uris[0]))
+        else:
+            ArrayList = autoclass('java.util.ArrayList')
+            lst = ArrayList()
+            for u in uris:
+                lst.add(cast(Parcelable, u))
+            it = Intent(Intent.ACTION_SEND_MULTIPLE)
+            it.setType('video/*')
+            it.putParcelableArrayListExtra(Intent.EXTRA_STREAM, lst)
+        it.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        chooser = Intent.createChooser(it, 'مشاركة')
+        _activity().startActivity(chooser)
+    except Exception:
+        log(traceback.format_exc())
 
 
 # ---------------------------------------------------------------------------

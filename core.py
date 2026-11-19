@@ -41,10 +41,8 @@ DEFAULT_SETTINGS = {
     'hold_speed': 2.0,         # speed while the finger is held down
     'seek_step': 10,
     'gestures': True,
-    'aspect': 'fit',           # fit | fill | stretch | 16:9 | 4:3
     'keep_awake': True,
     'auto_rotate': True,
-    'show_thumbs': True,
     'vibrate': True,
     'sub_size': 22,
     'sub_on': True,
@@ -280,6 +278,9 @@ def load_subtitle(path):
 # ---------------------------------------------------------------------------
 # persistence
 # ---------------------------------------------------------------------------
+MIN_RESUME = 3.0          # seconds: less than this watched = starts from zero, no progress bar
+
+
 class Store(object):
     def __init__(self, path, background=False):
         self.path = path
@@ -307,6 +308,7 @@ class Store(object):
             'auto': {},
             'coll_order': [],
             'hidden_colls': [],
+            'deleted_playlists': {},
             'settings': {},
         }
 
@@ -485,7 +487,10 @@ class Library(object):
 
     def set_progress(self, key, pos, dur):
         p = self.store.data['progress'].setdefault(key, {})
-        p['pos'] = float(pos)
+        pos = float(pos)
+        if pos < MIN_RESUME:
+            pos = 0.0                       # barely started: nothing to resume, no progress bar
+        p['pos'] = pos
         p['dur'] = float(dur) if dur else p.get('dur', 0)
         p['last'] = time.time()
         self.store.mark()
@@ -503,7 +508,7 @@ class Library(object):
     def resume_pos(self, key):
         p = self.progress(key)
         pos, dur = p.get('pos', 0), p.get('dur', 0) or self.videos.get(key, {}).get('duration', 0)
-        if pos < 5:
+        if pos < MIN_RESUME:
             return 0.0
         if dur and pos > dur - 8:
             return 0.0
@@ -512,7 +517,7 @@ class Library(object):
     def watched_fraction(self, key):
         p = self.progress(key)
         dur = p.get('dur') or self.videos.get(key, {}).get('duration') or 0
-        if not dur:
+        if not dur or p.get('pos', 0) < MIN_RESUME:
             return 0.0
         return max(0.0, min(1.0, p.get('pos', 0) / float(dur)))
 
@@ -577,6 +582,9 @@ class Library(object):
         if cid.startswith('a:'):
             b = self.buckets.get(cid[2:])
             base = list(b['keys']) if b else []
+            if b:
+                have = set(base)
+                base += [k for k in st.get('extra', []) if k in self.videos and k not in have]
             base = [k for k in base if k not in hidden]
             order = st.get('order', [])
         else:
@@ -669,6 +677,32 @@ class Library(object):
         return 'p:' + pid
 
     def add_to_playlist(self, cid, keys):
+        """Add videos to a list (a custom playlist or a device folder list).  Returns how many
+        were really added."""
+        if cid.startswith('a:'):
+            b = self.buckets.get(cid[2:])
+            if b is None:
+                return 0
+            st = self._auto_state(cid[2:])
+            hidden = set(st.get('hidden', []))
+            have = set(b['keys']) | set(st.get('extra', []))
+            n = 0
+            for k in keys:
+                if k not in self.videos:
+                    continue
+                if k in hidden:                     # it was removed from this list: bring it back
+                    hidden.discard(k)
+                    n += 1
+                elif k not in have:
+                    st.setdefault('extra', []).append(k)
+                    have.add(k)
+                    n += 1
+            if hidden:
+                st['hidden'] = sorted(hidden)
+            else:
+                st.pop('hidden', None)
+            self.store.mark()
+            return n
         p = self.store.data['playlists'].get(cid[2:])
         if p is None:
             return 0
@@ -692,18 +726,44 @@ class Library(object):
         self.store.mark()
 
     def delete_collection(self, cid):
+        """Custom playlists go to a bin (they can be restored); device lists are only hidden."""
         if cid.startswith('p:'):
-            self.store.data['playlists'].pop(cid[2:], None)
+            p = self.store.data['playlists'].pop(cid[2:], None)
+            if p is not None:
+                self.store.data['deleted_playlists'][cid[2:]] = p
         else:
             if cid not in self.store.data['hidden_colls']:
                 self.store.data['hidden_colls'].append(cid)
         self.store.mark()
 
-    def restore_hidden(self):
-        self.store.data['hidden_colls'] = []
-        for st in self.store.data['auto'].values():
-            st.pop('hidden', None)
-        self.store.mark()
+    def restorable(self):
+        """Deleted lists the user can bring back: [(id, name, number_of_videos)]."""
+        out = []
+        for cid in self.store.data['hidden_colls']:
+            b = self.buckets.get(cid[2:])
+            if b is None:
+                continue
+            name = self._auto_state(cid[2:]).get('name') or b['name']
+            out.append((cid, name, len([k for k in b['keys'] if k in self.videos])))
+        for pid, p in self.store.data['deleted_playlists'].items():
+            out.append(('p:' + pid, p.get('name', '?'), len([k for k in p.get('items', []) if k in self.videos])))
+        out.sort(key=lambda r: natural_key(r[1]))
+        return out
+
+    def restore_collections(self, ids):
+        n = 0
+        for cid in ids:
+            if cid.startswith('p:'):
+                p = self.store.data['deleted_playlists'].pop(cid[2:], None)
+                if p is not None:
+                    self.store.data['playlists'][cid[2:]] = p
+                    n += 1
+            elif cid in self.store.data['hidden_colls']:
+                self.store.data['hidden_colls'].remove(cid)
+                n += 1
+        if n:
+            self.store.mark()
+        return n
 
     def remove_from_collection(self, cid, keys):
         """Remove videos from the list only (the files stay on the device)."""
@@ -715,8 +775,13 @@ class Library(object):
                 p['order'] = [k for k in p.get('order', []) if k not in ks]
         else:
             st = self._auto_state(cid[2:])
-            h = set(st.get('hidden', [])) | ks
-            st['hidden'] = sorted(h)
+            b = self.buckets.get(cid[2:])
+            own = set(b['keys']) if b else set()
+            if st.get('extra'):
+                st['extra'] = [k for k in st['extra'] if k not in ks]
+            h = set(st.get('hidden', [])) | (ks & own)
+            if h:
+                st['hidden'] = sorted(h)
         self.store.mark()
 
     def forget_videos(self, keys):

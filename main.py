@@ -168,8 +168,6 @@ class ProPlayerApp(App):
 
     # ---- helpers used by pages -------------------------------------------------------
     def thumb(self, key, callback):
-        if not self.store.setting('show_thumbs'):
-            return None
         v = self.lib.videos.get(key)
         if v is None:
             return None
@@ -178,8 +176,8 @@ class ProPlayerApp(App):
     def open_collection(self, cid):
         self.root.push(CollectionPage(self, cid))
 
-    def open_picker(self, cid):
-        self.root.push(PickerPage(self, cid))
+    def open_picker(self, cid, new_name=None):
+        self.root.push(PickerPage(self, cid, new_name=new_name))
 
     def play(self, keys, index, cid=None):
         from player import PlayerPage          # imported lazily: needs ffpyplayer

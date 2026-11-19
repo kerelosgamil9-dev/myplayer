@@ -16,7 +16,7 @@ import random
 import time
 
 from kivy.clock import Clock
-from kivy.graphics import Color, Ellipse, Rectangle, RoundedRectangle
+from kivy.graphics import Color, Ellipse, Line, Rectangle, RoundedRectangle
 from kivy.metrics import dp, sp
 from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.widget import Widget
@@ -25,12 +25,10 @@ import bridge
 import core
 from engine import Engine
 from screens import Page
-from widgets import (ACCENT, SCRIM, SUB, Badge, ChipsRow, Dialog, Icon, IconButton, MenuSheet, SeekBar,
+from widgets import (ACCENT, ON_ACCENT, SCRIM, SUB, SURFACE2, TEXT, Badge, ChipsRow, Dialog, Icon, IconButton, MenuSheet, SeekBar,
                      SheetLabel, SheetRow, SheetTitle, StepButton, Tap, Txt)
 
-ASPECTS = ['fit', 'fill', 'stretch', '16:9', '4:3']
-ASPECT_LABELS = {'fit': 'ملائم للشاشة', 'fill': 'ملء الشاشة (قص)', 'stretch': 'تمديد',
-                 '16:9': '16:9', '4:3': '4:3'}
+END_WAIT = 5.0                           # seconds the end-of-video choice stays before the next video starts
 REPEAT_MODES = ['off', 'one', 'all', 'shuffle']
 REPEAT_LABELS = {'off': 'بدون تكرار', 'one': 'تكرار الفيديو الحالي', 'all': 'تكرار القائمة',
                  'shuffle': 'عشوائي'}
@@ -251,6 +249,113 @@ class SeekCard(Feedback):
         self.delta.size = (w, dp(26))
 
 
+class EndPanel(Widget):
+    """Shown when a video ends: "play again" and "play next" (with a 5 s countdown on the latter)."""
+
+    def __init__(self, on_replay=None, on_next=None, **kw):
+        kw.setdefault('size_hint', (None, None))
+        super(EndPanel, self).__init__(**kw)
+        self.on_replay, self.on_next = on_replay, on_next
+        self.has_next = False
+        self.frac = 1.0
+        self.title = Txt(ltext='انتهى الفيديو', bold=True, font_size=sp(18), align_mode='center',
+                         halign='center', size_hint=(None, None))
+        self.sub = Txt(color=SUB, font_size=sp(13), align_mode='center', halign='center',
+                       size_hint=(None, None))
+        self.btn_replay = Tap(callback=lambda w: self.on_replay and self.on_replay(),
+                              size_hint=(None, None), height=dp(52))
+        self.btn_next = Tap(callback=lambda w: self.on_next and self.on_next(),
+                            size_hint=(None, None), height=dp(52))
+        for b in (self.btn_replay, self.btn_next):
+            b.fb_radius = [dp(16)] * 4
+        self.lbl_replay = Txt(ltext='إعادة تشغيل', bold=True, font_size=sp(15.5), color=TEXT,
+                              halign='center', align_mode='center', size_hint=(None, None))
+        self.lbl_next = Txt(ltext='تشغيل التالي', bold=True, font_size=sp(15.5), color=ON_ACCENT,
+                            halign='center', align_mode='center', size_hint=(None, None))
+        self.count = Txt(ltext='', bold=True, font_size=sp(15), color=ON_ACCENT, halign='center',
+                         align_mode='center', size_hint=(None, None))
+        self.btn_replay.add_widget(self.lbl_replay)
+        self.btn_next.add_widget(self.lbl_next)
+        self.btn_next.add_widget(self.count)
+        for w in (self.title, self.sub, self.btn_replay, self.btn_next):
+            self.add_widget(w)
+        self._bar = None
+        self.bind(pos=self._lay, size=self._lay)
+
+    def configure(self, next_title, counting):
+        """next_title: title of the next video, or None when there is none."""
+        self.has_next = next_title is not None
+        self.sub.ltext = ('التالي: ' + next_title) if next_title else ''
+        self.btn_next.opacity = 1 if self.has_next else 0
+        self.btn_next.disabled = not self.has_next
+        self.frac = 1.0
+        self.count.ltext = '%d' % int(END_WAIT) if (self.has_next and counting) else ''
+        self._lay()
+
+    def set_remaining(self, secs):
+        """Countdown tick (secs left, or None to show no countdown)."""
+        if secs is None:
+            self.frac = 1.0
+            self.count.ltext = ''
+        else:
+            self.frac = max(0.0, min(1.0, secs / END_WAIT))
+            n = '%d' % max(1, int(secs + 0.999))
+            if n != self.count.ltext:
+                self.count.ltext = n
+        if self._bar is not None:
+            self._bar.size = (max(0.0, self._bar_w * self.frac), dp(3))
+
+    def _lay(self, *a):
+        x, y, w, h = self.x, self.y, self.width, self.height
+        self.canvas.before.clear()
+        self._bar = None
+        if w < 10 or h < 10:
+            return
+        pad, gap = dp(18), dp(10)
+        with self.canvas.before:
+            Color(0.07, 0.075, 0.09, 0.94)
+            RoundedRectangle(pos=(x, y), size=(w, h), radius=[dp(24)])
+            Color(1, 1, 1, 0.08)
+            Line(rounded_rectangle=(x + 0.5, y + 0.5, w - 1, h - 1, dp(24)), width=1)
+        self.title.pos = (x + pad, y + h - dp(52))
+        self.title.size = (w - 2 * pad, dp(34))
+        self.sub.pos = (x + pad, y + h - dp(80))
+        self.sub.size = (w - 2 * pad, dp(26))
+        bw = (w - 2 * pad - gap) / 2.0 if self.has_next else w - 2 * pad
+        by = y + dp(24)
+        # RTL: replay on the right, next on the left
+        self.btn_replay.size = (bw, dp(52))
+        self.btn_replay.pos = ((x + w) - pad - bw, by)
+        self.btn_next.size = (bw, dp(52))
+        self.btn_next.pos = (x + pad, by)
+        for b, lbl, accent in ((self.btn_replay, self.lbl_replay, not self.has_next),
+                               (self.btn_next, self.lbl_next, True)):
+            lbl.pos = b.pos
+            lbl.size = b.size
+            b.canvas.before.clear()
+            with b.canvas.before:
+                Color(*(ACCENT if accent else SURFACE2))
+                RoundedRectangle(pos=b.pos, size=b.size, radius=[dp(16)])
+        self.lbl_next.pos = (self.btn_next.x + dp(34), by)            # the number sits at the left end
+        self.lbl_next.size = (max(10, bw - dp(34)), dp(52))
+        self.lbl_replay.color = list(ON_ACCENT if not self.has_next else TEXT)
+        self.count.pos = (self.btn_next.x + dp(4), by)
+        self.count.size = (dp(32), dp(52))
+        self._bar_w = w - 2 * pad
+        with self.canvas.before:
+            Color(1, 1, 1, 0.12)
+            RoundedRectangle(pos=(x + pad, y + dp(12)), size=(self._bar_w, dp(3)), radius=[dp(1.5)])
+            Color(*ACCENT)
+            self._bar = RoundedRectangle(pos=(x + pad, y + dp(12)), size=(self._bar_w * self.frac, dp(3)),
+                                         radius=[dp(1.5)])
+
+    def on_touch_down(self, touch):
+        if not self.collide_point(*touch.pos):
+            return False
+        Widget.on_touch_down(self, touch)           # the two buttons
+        return True
+
+
 class PlayerPage(Page):
     BGCOLOR = (0, 0, 0, 1)                   # the bars around the picture are pure black
 
@@ -269,7 +374,6 @@ class PlayerPage(Page):
         self.seeking = False
         self.speed = float(self.store.setting('speed') or 1.0)
         self.hold_active = False
-        self.aspect = self.store.setting('aspect')
         self.repeat = self.store.setting('repeat')
         self.sub_files = []
         self.sub_track = None
@@ -304,7 +408,6 @@ class PlayerPage(Page):
         self.title = Txt(font_size=sp(16.5), align_mode='auto', size_hint=(None, None), bold=True)
         self.qinfo = Txt(font_size=sp(12), color=(1, 1, 1, 0.66), align_mode='left', size_hint=(None, None))
         self.btn_cc = IconButton('subtitle', callback=lambda w: self.subtitle_menu())
-        self.btn_rot = IconButton('rotate', callback=lambda w: self.rotate())
         self.btn_more = IconButton('dots', callback=lambda w: self.main_menu())
         self.cur = Txt(font_size=sp(13), halign='left', bold=True, size_hint=(None, None))
         self.dur = Txt(font_size=sp(13), halign='right', color=(1, 1, 1, 0.72), size_hint=(None, None))
@@ -320,18 +423,18 @@ class PlayerPage(Page):
         for b in (self.btn_prev, self.btn_next):
             b.size = (dp(48), dp(48))
             b.icon.size = (dp(28), dp(28))
-        self.btn_aspect = IconButton('aspect', callback=lambda w: self.cycle_aspect())
+        self.btn_rot = IconButton('screen_rotate', callback=lambda w: self.rotate())
         self.btn_unlock = IconButton('lock', color=ACCENT, callback=lambda w: self.set_lock(False),
                                      size=(dp(56), dp(56)), bg=SCRIM)
-        for w in (self.btn_back, self.title, self.qinfo, self.btn_cc, self.btn_rot, self.btn_more, self.cur, self.dur,
+        for w in (self.btn_back, self.title, self.qinfo, self.btn_cc, self.btn_more, self.cur, self.dur,
                   self.seek, self.btn_lock, self.btn_prev, self.btn_rew, self.btn_play, self.btn_fwd,
-                  self.btn_next, self.btn_aspect):
+                  self.btn_next, self.btn_rot):
             self.ctl.add_widget(w)
         self.sub_lbl = Txt(font_size=sp(self.store.setting('sub_size')), halign='center', valign='bottom',
                            nlines=2, keep_nl=True, size_hint=(None, None), outline_width=dp(2),
                            outline_color=(0, 0, 0, 1), bold=True)
         self.add_widget(self.sub_lbl)
-        self.fb = Badge()                                   # short messages (aspect ratio, +10 s from a button)
+        self.fb = Badge()                                   # short messages (+10 s from a button)
         self.speed_tag = Badge(font=sp(14))                 # permanent speed other than 1x
         self.hold_pill = Badge(pulse=True)                  # the 2x while the finger is held down
         self.bubble = Badge(font=sp(14))                    # time above the seek bar knob
@@ -343,6 +446,9 @@ class PlayerPage(Page):
                   self.fb, self.speed_tag, self.hold_pill, self.bubble, self.btn_unlock):
             self.add_widget(w)
         self.btn_unlock.opacity = 0
+        self.end_panel = EndPanel(on_replay=self._end_replay, on_next=self._end_next)
+        self._end_ev = None
+        self._end_until = None
         self.bind(pos=self._lay, size=self._lay)
         self._lay()
         self._ui_ev = Clock.schedule_interval(self._ui_tick, 0.1)
@@ -378,6 +484,7 @@ class PlayerPage(Page):
         if self._closed:
             return
         self._closed = True
+        self._hide_end()
         self.save_progress(force=True)
         try:
             self._ui_ev.cancel()
@@ -398,6 +505,9 @@ class PlayerPage(Page):
 
     def on_app_pause(self):
         if not self._closed:
+            if self._end_until is not None:          # do not start the next video behind the user's back
+                self._cancel_end_timer()
+                self.end_panel.set_remaining(None)
             self.save_progress(force=True)
             if not self.engine.paused:
                 self.engine.set_pause(True)
@@ -430,7 +540,7 @@ class PlayerPage(Page):
             self.app.root.say('الملف غير موجود')
             return
         self.key = key
-        self._ended = False
+        self._clear_ended()
         self._oriented = False
         self.title.ltext = self.lib.title(key)
         self.qinfo.ltext = ('%d / %d' % (self.cursor + 1, len(self.queue))) if len(self.queue) > 1 else ''
@@ -492,7 +602,7 @@ class PlayerPage(Page):
             vr.texture = tex
             self._place_key = None
         w, h = self.engine.size
-        key = (w, h, self.width, self.height, self.aspect)
+        key = (w, h, self.width, self.height)
         if key != self._place_key:
             self._place_key = key
             self._place_video()
@@ -509,11 +619,70 @@ class PlayerPage(Page):
                              self.engine.duration)
             self._ended = False
             return
-        if self.store.setting('autoplay_next') and self.next(auto=True):
-            return
+        # the video is over: let the person choose (replay / next) instead of jumping on at once
         self.engine.set_pause(True)
         self._sync_play_icon()
-        self.show_controls(True)
+        nxt = self._next_title()
+        self.show_controls(False)
+        self._show_end(nxt, counting=bool(self.store.setting('autoplay_next')) and nxt is not None)
+
+    # ------------------------------------------------------------------ end of video
+    def _has_next(self):
+        n = len(self.queue)
+        if n <= 1:
+            return False
+        return self.cursor + 1 < n or self.repeat in ('all', 'shuffle')
+
+    def _next_title(self):
+        if not self._has_next():
+            return None
+        c = self.cursor + 1 if self.cursor + 1 < len(self.queue) else 0
+        return self.lib.title(self.queue[self.order[c]])
+
+    def _show_end(self, next_title, counting):
+        self._cancel_end_timer()
+        self.end_panel.configure(next_title, counting)
+        if self.end_panel.parent is None:
+            self.add_widget(self.end_panel)
+        self._lay_end()
+        if counting:
+            self._end_until = time.time() + END_WAIT
+            self._end_ev = Clock.schedule_interval(self._end_tick, 0.1)
+
+    def _cancel_end_timer(self):
+        if self._end_ev is not None:
+            self._end_ev.cancel()
+            self._end_ev = None
+        self._end_until = None
+
+    def _hide_end(self):
+        self._cancel_end_timer()
+        if self.end_panel.parent is self:
+            self.remove_widget(self.end_panel)
+
+    def _clear_ended(self):
+        """The video is playing / seeking again: the end-of-video choice is obsolete."""
+        self._ended = False
+        self._hide_end()
+
+    def _end_tick(self, dt):
+        if self._closed or self._end_until is None:
+            self._cancel_end_timer()
+            return
+        left = self._end_until - time.time()
+        if left <= 0:
+            self._end_next()
+        else:
+            self.end_panel.set_remaining(left)
+
+    def _end_replay(self):
+        self._hide_end()
+        self._start_current(start=0.0)
+
+    def _end_next(self):
+        self._hide_end()
+        if not self.next(auto=True):
+            self._start_current(start=0.0)
 
     def _on_error(self, msg):
         self.app.root.say('تعذر تشغيل الفيديو')
@@ -544,7 +713,7 @@ class PlayerPage(Page):
         dur = self.engine.duration or 1e9
         target = max(0.0, min(dur - 0.5, pos + delta))
         self.engine.seek(target)
-        self._ended = False
+        self._clear_ended()
         if show:
             if side in self.step_fb:
                 W, H = self.size
@@ -554,7 +723,8 @@ class PlayerPage(Page):
             else:
                 self.fb.show('%s%d ث' % ('+' if delta > 0 else '−', abs(int(delta))), self._center(),
                              icon='step_fwd' if delta > 0 else 'step_back', duration=0.7)
-        self.show_controls(True)
+        if side not in self.step_fb:            # a double tap on the screen leaves the controls alone
+            self.show_controls(True)
 
     def set_speed(self, s, say=True):
         self.speed = float(s)
@@ -573,15 +743,10 @@ class PlayerPage(Page):
             self.speed_tag.hide()
 
     def rotate(self):
+        """Turn the screen: portrait -> landscape and back."""
         land = self.width > self.height
         bridge.set_orientation(bridge.SCREEN_PORTRAIT if land else bridge.SCREEN_LANDSCAPE)
-
-    def cycle_aspect(self):
-        i = (ASPECTS.index(self.aspect) + 1) % len(ASPECTS) if self.aspect in ASPECTS else 0
-        self.aspect = ASPECTS[i]
-        self.store.set_setting('aspect', self.aspect)
-        self._place_video()
-        self.fb.show(ASPECT_LABELS[self.aspect], self._center(), icon='aspect', duration=0.9)
+        self.show_controls(True)
 
     def set_lock(self, on):
         self.locked = bool(on)
@@ -645,7 +810,7 @@ class PlayerPage(Page):
         d = self.engine.duration
         if d:
             self.engine.seek(v * d, accurate=True)
-            self._ended = False
+            self._clear_ended()
         self.show_controls(True)
 
     # ------------------------------------------------------------------ periodic work
@@ -759,20 +924,9 @@ class PlayerPage(Page):
         if not w or not h or W <= 1:
             self._vrect.size = (0, 0)
             return
-        a = self.aspect
-        if a == 'stretch':
-            rw, rh = W, H
-        else:
-            ar = w / float(h)
-            if a == '16:9':
-                ar = 16 / 9.0
-            elif a == '4:3':
-                ar = 4 / 3.0
-            if a == 'fill':
-                s = max(W / ar, H)
-            else:
-                s = min(W / ar, H)
-            rw, rh = s * ar, s
+        ar = w / float(h)
+        k = min(W / ar, H)                           # the whole picture, black bars where it does not fill
+        rw, rh = k * ar, k
         self._vrect.size = (rw, rh)
         self._vrect.pos = (self.x + (W - rw) / 2.0, self.y + (H - rh) / 2.0)
 
@@ -797,12 +951,11 @@ class PlayerPage(Page):
             Rectangle(pos=(x0, y0), size=(W, bot_h + dp(30)), texture=self._grad,
                       tex_coords=(0, 1, 1, 1, 1, 0, 0, 0))
             Rectangle(pos=(x0, y0 + H - top_h - dp(20)), size=(W, top_h + dp(20)), texture=self._grad)
-        # top bar: back on the right, title (+ position in the queue), then cc / rotate / menu on the left
+        # top bar: back on the right, title (+ position in the queue), then cc / menu on the left
         top = y0 + H - top_h
         self.btn_back.pos = (x0 + W - pad - dp(48), top + dp(9))
         self.btn_more.pos = (x0 + pad, top + dp(9))
-        self.btn_rot.pos = (self.btn_more.x + dp(46), top + dp(9))
-        self.btn_cc.pos = (self.btn_rot.x + dp(46), top + dp(9))
+        self.btn_cc.pos = (self.btn_more.x + dp(46), top + dp(9))
         tl = self.btn_cc.x + dp(50)
         tw = max(10, self.btn_back.x - tl - dp(6))
         if self.qinfo.ltext:
@@ -822,13 +975,13 @@ class PlayerPage(Page):
         self.dur.size = (dp(54), dp(36))
         self.seek.pos = (x0 + pad + dp(54), sy)
         self.seek.size = (max(10, W - 2 * pad - dp(108)), dp(36))
-        # transport row: lock | prev  -10  PLAY  +10  next | aspect
+        # transport row: lock | prev  -10  PLAY  +10  next | rotate screen
         ry = y0 + dp(8)
         cx = x0 + W / 2.0
         narrow = W < dp(420)
         play, st, mid, sd = (dp(60), dp(48), dp(44), dp(44)) if narrow else (dp(64), dp(52), dp(48), dp(48))
         for b, d in ((self.btn_play, play), (self.btn_rew, st), (self.btn_fwd, st), (self.btn_prev, mid),
-                     (self.btn_next, mid), (self.btn_lock, sd), (self.btn_aspect, sd)):
+                     (self.btn_next, mid), (self.btn_lock, sd), (self.btn_rot, sd)):
             b.size = (d, d)
         gap = max(dp(2), min(dp(14), (W - 2 * pad - 2 * sd - play - 2 * st - 2 * mid) / 8.0))
         cyr = ry + play / 2.0
@@ -838,7 +991,7 @@ class PlayerPage(Page):
         self.btn_fwd.pos = (self.btn_play.x + play + gap, cyr - st / 2.0)
         self.btn_next.pos = (self.btn_fwd.x + st + gap, cyr - mid / 2.0)
         self.btn_lock.pos = (x0 + pad, cyr - sd / 2.0)
-        self.btn_aspect.pos = (x0 + W - pad - sd, cyr - sd / 2.0)
+        self.btn_rot.pos = (x0 + W - pad - sd, cyr - sd / 2.0)
         self.btn_unlock.center = (x0 + pad + dp(34), y0 + H / 2.0)
         # subtitles
         base = dp(154) if self.ctl_visible else dp(28)
@@ -846,11 +999,21 @@ class PlayerPage(Page):
         self.sub_lbl.pos = (x0 + W * 0.05, y0 + base)
         self._place_video()
         self._lay_perf()
+        self._lay_end()
+
+    def _lay_end(self):
+        cx, cy = self.x + self.width / 2.0, self.y + self.height / 2.0
+        w = min(self.width - dp(32), dp(400))
+        h = dp(172)
+        self.end_panel.size = (w, h)
+        self.end_panel.pos = (cx - w / 2.0, cy - h / 2.0)
 
     # ------------------------------------------------------------------ gestures
     def on_touch_down(self, touch):
         if not self.collide_point(*touch.pos):
             return False
+        if self.end_panel.parent is self and self.end_panel.on_touch_down(touch):
+            return True
         if self.locked:
             if self.btn_unlock.opacity and self.btn_unlock.on_touch_down(touch):
                 return True
@@ -968,7 +1131,7 @@ class PlayerPage(Page):
             elif mode == 'seek':
                 if 'target' in g:
                     self.engine.seek(g['target'])
-                    self._ended = False
+                    self._clear_ended()
                 self.seek_card.hide()
             elif mode in ('bright', 'vol'):
                 self.level.release()
@@ -996,6 +1159,8 @@ class PlayerPage(Page):
     def _single_tap(self, dt):
         self._single_ev = None
         self._last_tap = None
+        if self.end_panel.parent is self:           # the choice on screen must not be covered by the bars
+            return
         self.show_controls(not self.ctl_visible)
 
     def _double(self, x):
@@ -1076,8 +1241,6 @@ class PlayerPage(Page):
             rows.append(SheetRow('الترجمة', icon='subtitle',
                                  value=(self.sub_track.name[:14] if self.sub_track else 'لا يوجد'),
                                  callback=lambda w: (sheet.dismiss(), self.subtitle_menu())))
-            rows.append(SheetRow('نسبة العرض', icon='aspect', value=ASPECT_LABELS[self.aspect],
-                                 callback=lambda w: (self.cycle_aspect(), sheet.rebuild())))
             rows.append(SheetRow('التكرار', icon='repeat', value=REPEAT_LABELS[self.repeat],
                                  callback=lambda w: cycle_repeat()))
             rows.append(SheetRow('المسار الصوتي', icon='audio', value='تبديل',
@@ -1087,6 +1250,8 @@ class PlayerPage(Page):
             rows.append(SheetRow('سرعة الضغط المطول', icon='speed',
                                  value=core.fmt_speed(self.store.setting('hold_speed')),
                                  callback=lambda w: cycle_hold()))
+            rows.append(SheetRow('مشاركة الفيديو', icon='share',
+                                 callback=lambda w: (sheet.dismiss(), self.share())))
             rows.append(SheetRow('معلومات الفيديو', icon='info',
                                  callback=lambda w: (sheet.dismiss(), self.info())))
             rows.append(SheetRow('عداد الأداء (للفحص)', icon='tune', value='شغال' if self.perf_on else 'متوقف',
@@ -1134,6 +1299,11 @@ class PlayerPage(Page):
             sheet.rebuild()
         sheet = MenuSheet(self.app.root, build)
         self._sheet(sheet)
+
+    def share(self):
+        v = self.lib.videos.get(self.key)
+        if not v or not bridge.share_videos([v]):
+            self.app.root.say('تعذرت المشاركة')
 
     def info(self):
         v = self.lib.videos.get(self.key, {})

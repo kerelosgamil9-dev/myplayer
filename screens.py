@@ -8,16 +8,15 @@ from kivy.graphics import Color, Ellipse, Line, Rectangle, RoundedRectangle, Tri
 from kivy.metrics import dp, sp
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.floatlayout import FloatLayout
-from kivy.uix.scrollview import ScrollView
 from kivy.uix.widget import Widget
 
 import bridge
 import core
 import textfix
-from widgets import (ACCENT, ACCENT_SOFT, BG, DANGER, DIVIDER, ON_ACCENT, SUB, SURFACE, SURFACE2, TEXT,
+from widgets import (ACCENT, ACCENT_SOFT, BG, DANGER, DIVIDER, SUB, SURFACE, SURFACE2, TEXT,
                      ChipsRow, Dialog, EmptyState, FieldInput, Group, Icon, IconButton, MenuSheet,
-                     PromptDialog, Row, SheetLabel, SheetRow, SheetTitle, PillSwitch, Tap, Thumb,
-                     Tag, Toast, Txt, VList, icon_chip)
+                     PromptDialog, Row, SheetButton, SheetLabel, SheetRow, SheetTitle, PillSwitch, Tap,
+                     Thumb, Tag, Toast, Txt, VList, icon_chip, make_scroll)
 
 
 # ---------------------------------------------------------------------------
@@ -483,11 +482,13 @@ def ask_text(app, title, text, hint, on_ok, ok_label='حفظ'):
 
 
 def choose_playlist(app, keys, after=None):
-    """Sheet: add the given video keys to a playlist (or a new one)."""
+    """Sheet: add the given video keys to any list (or to a new one)."""
     lib = app.lib
+    keys = list(keys)
 
     def done(msg):
         app.root.say(msg)
+        app.store.save()
         if after:
             after()
         app.root.refresh_pages()
@@ -496,20 +497,24 @@ def choose_playlist(app, keys, after=None):
         rows = [SheetTitle('إضافة إلى قائمة تشغيل'),
                 SheetRow('قائمة تشغيل جديدة', icon='plus', callback=lambda w: new())]
         for c in lib.collections():
-            if c.kind == 'custom':
-                rows.append(SheetRow(c.name, icon='playlist',
-                                     value=core.count_videos_label(c.count),
-                                     callback=lambda w, cid=c.id, nm=c.name: pick(cid, nm)))
+            rows.append(SheetRow(c.name, icon='playlist', value=core.count_videos_label(c.count),
+                                 callback=lambda w, cid=c.id, nm=c.name: pick(cid, nm)))
         return rows
     sheet = MenuSheet(app.root, build)
 
     def pick(cid, name):
         sheet.dismiss()
         n = lib.add_to_playlist(cid, keys)
-        done('تمت إضافة %d فيديو إلى «%s»' % (n, name))
+        if n:
+            done('تمت إضافة %d فيديو إلى «%s»' % (n, name))
+        else:
+            done('الفيديوهات موجودة بالفعل في «%s»' % name)
 
     def new():
         sheet.dismiss()
+        if not keys:
+            app.root.say('اختر فيديو واحد على الأقل')
+            return
 
         def ok(name):
             cid = lib.create_playlist(name, keys)
@@ -519,31 +524,57 @@ def choose_playlist(app, keys, after=None):
 
 
 def sort_sheet(app, title, modes, get_state, set_state, extra=None):
-    """Generic 'sort by' sheet. get_state() -> (mode, asc); set_state(mode, asc)."""
+    """Generic 'sort by' sheet. get_state() -> (mode, asc); set_state(mode, asc).
+
+    The sheet keeps its own copy of the choice and redraws at once; the (slow) re-sorting of the
+    page behind it happens a moment later, so the sheet never freezes or jumps.  Its rows are the
+    same in every mode, so its height never changes either."""
+    cur = list(get_state())
+
     def build():
-        mode, asc = get_state()
+        mode, asc = cur
         rows = [SheetTitle(title)]
         for m in modes:
             rows.append(SheetRow(core.SORT_LABELS.get(m, m), checked=(m == mode),
                                  callback=lambda w, m=m: pick(m)))
-        if mode != 'manual':
-            rows.append(SheetLabel('الاتجاه'))
-            rows.append(SheetRow('تصاعدي', icon='up', checked=asc, callback=lambda w: setd(True)))
-            rows.append(SheetRow('تنازلي', icon='down', checked=not asc, callback=lambda w: setd(False)))
+        rows.append(SheetLabel('الاتجاه'))
+        rows.append(SheetRow('تصاعدي', icon='up', checked=asc, callback=lambda w: setd(True)))
+        rows.append(SheetRow('تنازلي', icon='down', checked=not asc, callback=lambda w: setd(False)))
         return rows
     sheet = MenuSheet(app.root, build)
 
-    def pick(m):
-        _, asc = get_state()
-        set_state(m, asc if m != 'manual' else True)
+    def apply(mode, asc):
+        set_state(mode, asc)
+        cur[0], cur[1] = get_state()          # what the page really stored (manual order resets it)
         sheet.rebuild()
 
-    def setd(a):
-        m, _ = get_state()
-        set_state(m, a)
+    def pick(m):
+        if m == cur[0]:
+            return
+        cur[0] = m
+        if m == 'manual':
+            cur[1] = True
         sheet.rebuild()
+        Clock.schedule_once(lambda dt: apply(cur[0], cur[1]), 0.05)
+
+    def setd(a):
+        if a == cur[1]:
+            return
+        cur[1] = a
+        sheet.rebuild()
+        Clock.schedule_once(lambda dt: apply(cur[0], cur[1]), 0.05)
     sheet.show()
     return sheet
+
+
+def share_keys(app, keys):
+    """Open the system share sheet for the given video keys."""
+    vids = [app.lib.videos[k] for k in keys if k in app.lib.videos]
+    if not vids:
+        app.root.say('لا توجد فيديوهات للمشاركة')
+        return
+    if not bridge.share_videos(vids):
+        app.root.say('تعذرت المشاركة')
 
 
 def selection_keys(ctx, lib):
@@ -747,7 +778,7 @@ class SettingsPane(FloatLayout):
     def __init__(self, app, **kw):
         super(SettingsPane, self).__init__(**kw)
         self.app = app
-        self.sv = ScrollView(size_hint=(1, 1), do_scroll_x=False, bar_width=dp(3))
+        self.sv = make_scroll(size_hint=(1, 1))
         self.box = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(4),
                              padding=[dp(14), dp(8), dp(14), dp(30)])
         self.box.bind(minimum_height=self.box.setter('height'))
@@ -773,7 +804,7 @@ class SettingsPane(FloatLayout):
         return SwitchRow(label, bool(self.S(key)), lambda v, k=key: self.put(k, v), icon=icon)
 
     def build(self):
-        a, lib = self.app, self.app.lib
+        lib = self.app.lib
         box = self.box
         box.clear_widgets()
         n_vid = len(lib.videos)
@@ -792,9 +823,6 @@ class SettingsPane(FloatLayout):
             rows.append(SheetRow('إعادة تفعيل التشغيل بالهاردوير', icon='restore',
                                  callback=lambda w: self.reset_hw()))
         self.card('التشغيل', rows)
-        self.card('المظهر', [
-            SwitchRow('إظهار الصور المصغرة', bool(self.S('show_thumbs')),
-                      lambda v: (self.put('show_thumbs', v), a.root.refresh_pages()), icon='folder_play')])
         self.card('خيارات', [
             SheetRow('السرعة عند الضغط المطول', icon='speed', value=core.fmt_speed(self.S('hold_speed')),
                      callback=lambda w: self.pick_number('hold_speed', 'السرعة عند الضغط المطول',
@@ -805,11 +833,10 @@ class SettingsPane(FloatLayout):
             SheetRow('حجم الترجمة', icon='subtitle', value=str(self.S('sub_size')),
                      callback=lambda w: self.pick_number('sub_size', 'حجم الترجمة',
                                                          [16, 20, 22, 26, 30, 36], str))])
-        self.card('البيانات', [
-            SheetRow('إظهار القوائم المخفية', icon='restore', callback=lambda w: self.restore()),
-            SheetRow('مسح الصور المصغرة', icon='trash', callback=lambda w: self.clear_thumbs()),
-            SheetRow('مسح سجل المشاهدة', icon='clock', callback=lambda w: self.clear_hist()),
-            SheetRow('إعادة فحص الفيديوهات', icon='rotate', callback=lambda w: a.rescan(True))])
+        n_back = len(lib.restorable())
+        self.card('القوائم', [
+            SheetRow('استعادة القوائم المحذوفة', icon='restore',
+                     value=('%d' % n_back) if n_back else '', callback=lambda w: self.restore())])
         box.add_widget(SheetLabel('Pro Player  •  تشغيل الفيديو بالسرعات والترتيب الذي تريده', muted=True))
 
     def pick_number(self, key, title, options, fmt):
@@ -835,22 +862,49 @@ class SettingsPane(FloatLayout):
         self.build()
 
     def restore(self):
-        self.app.lib.restore_hidden()
-        self.app.root.say('تمت إعادة القوائم المخفية')
-        self.app.root.refresh_pages()
+        """Sheet with the deleted lists: tick the ones to bring back (or all of them)."""
+        app, lib = self.app, self.app.lib
+        rows_data = lib.restorable()
+        if not rows_data:
+            app.root.say('لا توجد قوائم محذوفة')
+            return
+        chosen = set()
 
-    def clear_thumbs(self):
-        n = self.app.thumbs.clear_cache()
-        self.app.root.say('تم مسح %d صورة مصغرة' % n)
-        self.app.root.refresh_pages()
+        def build():
+            rows = [SheetTitle('استعادة القوائم المحذوفة')]
+            n = len(chosen)
+            rows.append(SheetButton('استعادة المحدد (%d)' % n if n else 'اختر قوائم للاستعادة',
+                                    callback=lambda w: go(), enabled=bool(n)))
+            all_on = len(chosen) == len(rows_data)
+            rows.append(SheetRow('إلغاء تحديد الكل' if all_on else 'تحديد الكل', icon='select_all',
+                                 callback=lambda w: toggle_all()))
+            for cid, name, cnt in rows_data:
+                rows.append(SheetRow(name, icon='playlist', value=core.count_videos_label(cnt),
+                                     checked=cid in chosen, callback=lambda w, cid=cid: toggle(cid)))
+            return rows
+        sheet = MenuSheet(app.root, build)
 
-    def clear_hist(self):
-        def ok():
-            for k in list(self.app.store.data['progress']):
-                self.app.lib.clear_progress(k)
-            self.app.root.say('تم مسح السجل')
-            self.app.root.refresh_pages()
-        confirm(self.app, 'مسح السجل', 'سيتم مسح سجل المشاهدة وأماكن الاستكمال.', 'مسح', ok)
+        def toggle(cid):
+            if cid in chosen:
+                chosen.discard(cid)
+            else:
+                chosen.add(cid)
+            sheet.rebuild()
+
+        def toggle_all():
+            if len(chosen) == len(rows_data):
+                chosen.clear()
+            else:
+                chosen.update(r[0] for r in rows_data)
+            sheet.rebuild()
+
+        def go():
+            sheet.dismiss()
+            n = lib.restore_collections(list(chosen))
+            app.store.save()
+            app.root.say('تمت استعادة %d قائمة' % n)
+            app.root.refresh_pages()
+        sheet.show()
 
 
 # ---------------------------------------------------------------------------
@@ -970,7 +1024,7 @@ def delete_videos_dialog(app, keys, after):
 # ---------------------------------------------------------------------------
 class HomePage(Page, ListPageMixin):
     TABS = [('videos', 'مقاطع فيديو'), ('playlists', 'قوائم التشغيل')]
-    NAVS = [('library', 'folder_play', 'على الجهاز'), ('history', 'clock', 'السجل'), ('me', 'person', 'أنا')]
+    NAVS = [('library', 'folder_play', 'على الجهاز'), ('history', 'clock', 'السجل'), ('me', 'person', 'الإعدادات')]
 
     def __init__(self, app, **kw):
         super(HomePage, self).__init__(app, **kw)
@@ -1125,7 +1179,7 @@ class HomePage(Page, ListPageMixin):
                 self.empty.ltext = 'جارٍ تحميل الفيديوهات…'
             elif not self.app.permitted:
                 self.empty.icon.name = 'lock'
-                self.empty.ltext = 'يلزم السماح بالوصول إلى الفيديوهات.\nاضغط على «أنا» ثم «إعادة فحص الفيديوهات».'
+                self.empty.ltext = 'يلزم السماح بالوصول إلى الفيديوهات.\nاسمح بالوصول من إعدادات الهاتف ثم ارجع للتطبيق.'
             elif self.nav == 'history':
                 self.empty.icon.name = 'clock'
                 self.empty.ltext = 'لا يوجد سجل مشاهدة بعد'
@@ -1156,7 +1210,7 @@ class HomePage(Page, ListPageMixin):
         if self.nav == 'history':
             self.header.set('السجل', '', [], [self.btn_search])
         elif self.nav == 'me':
-            self.header.set('أنا', '', [], [])
+            self.header.set('الإعدادات', '', [], [])
         else:
             left = [self.btn_menu, self.btn_search]
             if self.mode != 'folders':
@@ -1167,6 +1221,7 @@ class HomePage(Page, ListPageMixin):
         n = len(self.ctx.selected)
         btns = [IconButton('select_all', callback=lambda w: self.select_all())]
         videos = self.nav == 'history' or self.mode == 'videos'
+        btns.append(IconButton('share', callback=lambda w: self.act_share()))
         if videos:
             btns.append(IconButton('playlist_add', callback=lambda w: self.act_add()))
             if n == 1:
@@ -1250,11 +1305,9 @@ class HomePage(Page, ListPageMixin):
         k = item.get('kind')
         if k == 'create':
             def ok(name):
-                cid = self.app.lib.create_playlist(name)
-                self.app.store.save()
-                self.rebuild()
-                self.app.open_collection(cid)
-            ask_text(self.app, 'قائمة تشغيل جديدة', '', 'اسم القائمة', ok, 'إنشاء')
+                # a playlist only exists once it has videos: pick them first
+                self.app.open_picker(None, new_name=name)
+            ask_text(self.app, 'قائمة تشغيل جديدة', '', 'اسم القائمة', ok, 'التالي')
         elif k == 'coll':
             self.app.open_collection(item['coll'].id)
         elif k == 'video':
@@ -1277,12 +1330,18 @@ class HomePage(Page, ListPageMixin):
         lib = self.app.lib
         if self.nav == 'history' or self.mode == 'videos':
             return [k for k in self.ctx.selected if k in lib.videos]
-        keys = []
-        for cid in self.ctx.selected:
+        keys, seen = [], set()
+        for cid in self.ctx.selected:                    # whole lists: every video once
             c = lib.collection(cid)
             if c:
-                keys.extend(c.keys)
+                for k in c.keys:
+                    if k not in seen:
+                        seen.add(k)
+                        keys.append(k)
         return keys
+
+    def act_share(self):
+        share_keys(self.app, self._selected_videos())
 
     def act_add(self):
         keys = self._selected_videos()
@@ -1329,7 +1388,7 @@ class HomePage(Page, ListPageMixin):
             after()
         confirm(app, 'حذف قوائم التشغيل',
                 'سيتم حذف %d قائمة من التطبيق فقط. الفيديوهات تبقى في الجهاز، '
-                'ويمكنك إعادة القوائم الأصلية من «أنا».' % len(ids), 'حذف', ok)
+                'ويمكنك استعادة القوائم من الإعدادات.' % len(ids), 'حذف', ok)
 
 
 # ---------------------------------------------------------------------------
@@ -1341,7 +1400,7 @@ class SettingsPage(Page):
     def __init__(self, app, **kw):
         super(SettingsPage, self).__init__(app, **kw)
         self.header = Header()
-        self.pane = SettingsPane(app)
+        self.pane = SettingsPane(app, size_hint=(None, None))     # sized by _lay: below the header
         self.add_widget(self.pane)
         self.add_widget(self.header)
         self.header.set('الإعدادات', '', [IconButton('back', callback=lambda w: self.app.root.back())], [])
@@ -1370,16 +1429,8 @@ class CollectionPage(Page, ListPageMixin):
         self.query = ''
         self.search_on = False
         self.field = None
-        self.vlist.bottom_pad = dp(92)                 # the last row must be able to clear the button
-        self.fab = Tap(callback=lambda w: self.play_all(), size_hint=(None, None), size=(dp(172), dp(54)))
-        self.fab.fb_radius = [dp(27)] * 4
-        self.fab_icon = Icon(name='play', color=list(ON_ACCENT), size=(dp(22), dp(22)))
-        self.fab_lbl = Txt(ltext='تشغيل الكل', bold=True, color=ON_ACCENT, font_size=sp(15.5),
-                           halign='center', size_hint=(None, None))
-        self.fab.add_widget(self.fab_icon)
-        self.fab.add_widget(self.fab_lbl)
         self.empty = EmptyState('playlist')
-        for w in (self.vlist, self.header, self.empty, self.fab):
+        for w in (self.vlist, self.header, self.empty):
             self.add_widget(w)
         self.btn_back = IconButton('back', callback=lambda w: self.app.root.back())
         self.btn_close = IconButton('close', callback=lambda w: self.exit_selection())
@@ -1399,19 +1450,6 @@ class CollectionPage(Page, ListPageMixin):
         self.header.pos = (self.x, (self.y + self.height) - hh)
         self.vlist.pos = self.pos
         self.vlist.size = (self.width, max(0, (self.y + self.height) - hh - self.y))
-        f = self.fab
-        f.pos = (self.x + dp(18), self.y + dp(20))
-        if hasattr(self, 'fab_icon'):
-            f.size = (dp(172), dp(54))
-            self.fab_icon.center = ((f.x + f.width) - dp(30), f.y + f.height / 2.0)
-            self.fab_lbl.pos = (f.x + dp(10), f.y)
-            self.fab_lbl.size = (f.width - dp(10) - dp(54), f.height)
-        f.canvas.before.clear()
-        with f.canvas.before:
-            Color(0, 0, 0, 0.38)                               # soft shadow
-            RoundedRectangle(pos=(f.x, f.y - dp(3)), size=f.size, radius=[dp(27)])
-            Color(*ACCENT)
-            RoundedRectangle(pos=f.pos, size=f.size, radius=[dp(27)])
         self.empty.pos = (self.x + dp(30), self.vlist.y + self.vlist.height * 0.4)
         self.empty.size = (self.width - dp(60), dp(80))
 
@@ -1441,12 +1479,10 @@ class CollectionPage(Page, ListPageMixin):
         self.vlist.reorderable = bool(self.ctx.sel_mode and not self.query)
         self.vlist.set_items([{'kind': 'video', 'key': k} for k in keys])
         if not keys:
-            self.empty.ltext = 'القائمة فارغة.\nاضغط + لإضافة فيديوهات.' if c.kind == 'custom' and not self.query \
+            self.empty.ltext = 'القائمة فارغة.\nاضغط + لإضافة فيديوهات.' if not self.query \
                 else 'لا توجد فيديوهات'
         else:
             self.empty.ltext = ''
-        self.fab.opacity = 1 if keys else 0
-        self.fab.disabled = not keys
         self.update_header()
 
     def update_header(self):
@@ -1456,9 +1492,8 @@ class CollectionPage(Page, ListPageMixin):
         if self.ctx.sel_mode:
             n = len(self.ctx.selected)
             left = [IconButton('select_all', callback=lambda w: self.select_all()),
+                    IconButton('share', callback=lambda w: self.act_share()),
                     IconButton('playlist_add', callback=lambda w: self.act_add())]
-            if n == 1:
-                left.append(IconButton('edit', callback=lambda w: self.act_rename()))
             left.append(IconButton('trash', color=DANGER, callback=lambda w: self.act_delete()))
             left.append(IconButton('dots', callback=lambda w: self.more_menu()))
             self.header.set('%d محدد' % n, '', [self.btn_close], left)
@@ -1471,9 +1506,7 @@ class CollectionPage(Page, ListPageMixin):
         total = self.app.lib.total_duration(c.keys)
         if total:
             sub += '  •  ' + core.fmt_time(total)
-        left = [self.btn_search, self.btn_sort]
-        if c.kind == 'custom':
-            left.insert(0, self.btn_add)
+        left = [self.btn_add, self.btn_search, self.btn_sort]
         self.header.set(c.name, sub, [self.btn_back], left)
 
     def on_selection_changed(self):
@@ -1514,7 +1547,7 @@ class CollectionPage(Page, ListPageMixin):
             return lib.collection_sort(self.cid)
 
         def put(mode, asc):
-            if mode == 'manual':
+            if mode == 'manual' and lib.collection_sort(self.cid)[0] != 'manual':
                 # keep the current visual order as the manual order
                 lib.set_manual_order(self.cid, lib.items(self.cid))
             else:
@@ -1527,11 +1560,6 @@ class CollectionPage(Page, ListPageMixin):
     def open_item(self, idx, item):
         keys = [i['key'] for i in self.vlist.items]
         self.app.play(keys, keys.index(item['key']), cid=self.cid)
-
-    def play_all(self):
-        keys = [i['key'] for i in self.vlist.items]
-        if keys:
-            self.app.play(keys, 0, cid=self.cid)
 
     def _reorder(self, src, dst):
         items = list(self.vlist.items)
@@ -1552,6 +1580,9 @@ class CollectionPage(Page, ListPageMixin):
     def act_add(self):
         keys = selection_keys(self.ctx, self.app.lib)
         choose_playlist(self.app, keys, after=self.exit_selection)
+
+    def act_share(self):
+        share_keys(self.app, selection_keys(self.ctx, self.app.lib))
 
     def act_rename(self):
         sid = next(iter(self.ctx.selected))
@@ -1574,8 +1605,11 @@ class CollectionPage(Page, ListPageMixin):
         lib, app = self.app.lib, self.app
 
         def build():
-            return [SheetTitle('المزيد'),
-                    SheetRow('تشغيل المحدد', icon='play', callback=lambda w: do('play')),
+            rows = [SheetTitle('المزيد'),
+                    SheetRow('تشغيل المحدد', icon='play', callback=lambda w: do('play'))]
+            if len(self.ctx.selected) == 1:
+                rows.append(SheetRow('تعديل الاسم', icon='edit', callback=lambda w: (sheet.dismiss(), self.act_rename())))
+            return rows + [
                     SheetRow('نقل إلى أول القائمة', icon='move_top', callback=lambda w: do('top')),
                     SheetRow('نقل إلى آخر القائمة', icon='move_bottom', callback=lambda w: do('bottom')),
                     SheetRow('إزالة من القائمة فقط', icon='close', callback=lambda w: do('remove'))]
@@ -1603,9 +1637,13 @@ class CollectionPage(Page, ListPageMixin):
 # Picker: choose videos to add into a custom playlist
 # ---------------------------------------------------------------------------
 class PickerPage(Page, ListPageMixin):
-    def __init__(self, app, cid, **kw):
+    """Tick videos.  With a cid they are added to that list; with new_name (and no cid) they
+    become a NEW playlist - which is only created when at least one video is ticked."""
+
+    def __init__(self, app, cid, new_name=None, **kw):
         super(PickerPage, self).__init__(app, **kw)
         self.cid = cid
+        self.new_name = new_name
         self.init_list()
         self.ctx.sel_mode = True
         self.ctx.reorder = False
@@ -1628,13 +1666,15 @@ class PickerPage(Page, ListPageMixin):
 
     def refresh(self):
         lib = self.app.lib
-        existing = set(lib.items(self.cid))
+        existing = set(lib.items(self.cid)) if self.cid else set()
         keys = [k for k in lib.all_videos_sorted() if k not in existing]
         self.vlist.set_items([{'kind': 'video', 'key': k} for k in keys])
         self.update_header()
 
     def update_header(self):
-        self.header.set('اختر الفيديوهات (%d)' % len(self.ctx.selected), '', [self.btn_close],
+        title = ('«%s»  •  %d' % (self.new_name, len(self.ctx.selected))) if self.new_name \
+            else 'اختر الفيديوهات (%d)' % len(self.ctx.selected)
+        self.header.set(title, 'اختر فيديو واحد على الأقل' if self.new_name else '', [self.btn_close],
                         [self.btn_ok, self.btn_all])
 
     def on_selection_changed(self):
@@ -1659,6 +1699,16 @@ class PickerPage(Page, ListPageMixin):
 
     def confirm(self):
         keys = [i['key'] for i in self.vlist.items if i['key'] in self.ctx.selected]
+        if self.cid is None:
+            if not keys:
+                self.app.root.say('اختر فيديو واحد على الأقل لإنشاء القائمة')
+                return
+            cid = self.app.lib.create_playlist(self.new_name, keys)
+            self.app.store.save()
+            self.app.root.pop()
+            self.app.root.refresh_pages()
+            self.app.open_collection(cid)
+            return
         if keys:
             n = self.app.lib.add_to_playlist(self.cid, keys)
             self.app.store.save()

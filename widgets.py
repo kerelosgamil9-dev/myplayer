@@ -243,8 +243,6 @@ ICONS = {
                                               for a in range(0, 360, 45)],
     'volume': [('fill', [(4, 9), (8, 9), (13, 5), (13, 19), (8, 15), (4, 15)]),
                ('line', _arc(14, 12, 4, -50, 50)), ('line', _arc(14, 12, 8, -50, 50))],
-    'aspect': [('line', [(4, 9), (4, 4), (9, 4)]), ('line', [(15, 4), (20, 4), (20, 9)]),
-               ('line', [(20, 15), (20, 20), (15, 20)]), ('line', [(9, 20), (4, 20), (4, 15)])],
     'repeat': [('line', [(4, 11), (4, 7), (18, 7)]), ('line', [(15, 4), (18, 7), (15, 10)]),
                ('line', [(20, 13), (20, 17), (6, 17)]), ('line', [(9, 14), (6, 17), (9, 20)])],
     'repeat_one': [('line', [(4, 11), (4, 7), (18, 7)]), ('line', [(15, 4), (18, 7), (15, 10)]),
@@ -267,6 +265,12 @@ ICONS = {
     'volume_mute': [('fill', [(4, 9), (8, 9), (13, 5), (13, 19), (8, 15), (4, 15)]),
                     ('line', [(16, 9.5), (21, 14.5)]), ('line', [(21, 9.5), (16, 14.5)])],
     'bolt': [('fill', [(13, 3), (6, 13), (11, 13), (10, 21), (18, 10), (13, 10)])],
+    'share': [('dot', 18, 5.5, 2.5), ('dot', 6, 12, 2.5), ('dot', 18, 18.5, 2.5),
+              ('line', [(8.2, 10.8), (15.8, 6.7)]), ('line', [(8.2, 13.2), (15.8, 17.3)])],
+    # a phone with a turning arrow on each side: rotate the screen
+    'screen_rotate': [('line', [(9.2, 7.5), (14.8, 7.5), (14.8, 16.5), (9.2, 16.5), (9.2, 7.5)]),
+                      ('line', _arc(12, 12, 9.4, 305, 385, 14)), _arrow_fill(12, 12, 9.4, 385, 3.4),
+                      ('line', _arc(12, 12, 9.4, 125, 205, 14)), _arrow_fill(12, 12, 9.4, 205, 3.4)],
 }
 
 
@@ -1281,6 +1285,20 @@ class VList(StencilView):
 # ---------------------------------------------------------------------------
 # overlays: sheet / dialogs / toast
 # ---------------------------------------------------------------------------
+def make_scroll(**kw):
+    """A ScrollView that can be dragged starting on a button.
+
+    Kivy's default decides within 55 ms / 20 sp whether a touch is a scroll; a slower drag that
+    starts on a row is handed to the row as a *press* and the list never moves.  Here a touch
+    becomes a scroll after only a few dp of movement, and is handed to the row only when the
+    finger stays still for a good while (a plain tap is still passed on when it is released)."""
+    kw.setdefault('do_scroll_x', False)
+    kw.setdefault('bar_width', dp(3))
+    kw.setdefault('scroll_distance', dp(6))
+    kw.setdefault('scroll_timeout', 450)
+    return ScrollView(**kw)
+
+
 class Overlay(FloatLayout):
     cancelable = True
 
@@ -1395,6 +1413,35 @@ class SheetRow(Tap):
         self.lbl.size = (max(10, right - left - vw - dp(6)), self.height)
 
 
+class SheetButton(Widget):
+    """A wide rounded button inside a sheet (accent when enabled, quiet when not)."""
+
+    def __init__(self, label, callback=None, enabled=True, **kw):
+        kw.setdefault('size_hint', (1, None))
+        kw.setdefault('height', dp(74))
+        super(SheetButton, self).__init__(**kw)
+        self.enabled = bool(enabled)
+        self.btn = Tap(callback=(callback if enabled else None), size_hint=(None, None), height=dp(52))
+        self.btn.fb_radius = [dp(16)] * 4
+        self.lbl = Txt(ltext=label, halign='center', bold=True, font_size=sp(16.5),
+                       color=ON_ACCENT if enabled else SUB, size_hint=(None, None))
+        self.btn.add_widget(self.lbl)
+        self.add_widget(self.btn)
+        self.bind(pos=self._lay, size=self._lay)
+        self._lay()
+
+    def _lay(self, *a):
+        b = self.btn
+        b.pos = (self.x + dp(18), self.y + dp(11))
+        b.size = (max(10, self.width - dp(36)), dp(52))
+        self.lbl.pos = b.pos
+        self.lbl.size = b.size
+        b.canvas.before.clear()
+        with b.canvas.before:
+            Color(*(ACCENT if self.enabled else SURFACE2))
+            RoundedRectangle(pos=b.pos, size=b.size, radius=[dp(16)])
+
+
 class SheetTitle(Widget):
     def __init__(self, text, **kw):
         kw.setdefault('size_hint', (1, None))
@@ -1478,7 +1525,7 @@ class MenuSheet(Overlay):
         self.build = build
         self.panel = Panel()
         self.add_widget(self.panel)
-        self.sv = ScrollView(size_hint=(None, None), do_scroll_x=False, bar_width=dp(3))
+        self.sv = make_scroll(size_hint=(None, None))
         self.box = BoxLayout(orientation='vertical', size_hint_y=None,
                              padding=[0, self.PAD_TOP, 0, self.PAD_BOTTOM])
         self.box.bind(minimum_height=self.box.setter('height'))
@@ -1496,6 +1543,9 @@ class MenuSheet(Overlay):
             total += w.height
             self.box.add_widget(w)
         self.content_h = total
+        self.box.height = total                 # at once: do not wait for the next layout pass
+        if total <= self.sv.height:
+            self.sv.scroll_y = 1                # content that fits is never left scrolled
         self._ready = True
         self.place()
 
