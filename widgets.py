@@ -142,6 +142,16 @@ class Txt(Label):
         self.text = vis
         self.text_size = (w, self.height)
 
+    def logical_lines(self):
+        """The lines the text is wrapped into (logical order), at the current width."""
+        txt = self.ltext or ''
+        if not txt or self.width < 2:
+            return [txt]
+        font = font_for(txt)
+        size, bold = self.font_size, self.bold
+        return textfix.wrap_text(txt, self.width, lambda t: measure(t, font, size, bold),
+                                 max(1, self.nlines)) or [txt]
+
     def text_width(self):
         txt = self.ltext or ''
         if not txt:
@@ -330,6 +340,9 @@ class Icon(Widget):
 # ---------------------------------------------------------------------------
 # tap targets
 # ---------------------------------------------------------------------------
+TAP_SLOP = dp(12)           # a finger that travels further than this between down and up did not tap
+
+
 class Tap(Widget):
     """Plain touch target with press feedback; callback(widget) on release."""
 
@@ -369,6 +382,7 @@ class Tap(Widget):
             return False
         touch.grab(self)
         self._long_fired = False
+        self._down = (touch.x, touch.y)
         self._set_pressed(True)
         if self.long_callback:
             self._long_ev = Clock.schedule_once(self._long, 0.45)
@@ -383,7 +397,9 @@ class Tap(Widget):
 
     def on_touch_move(self, touch):
         if touch.grab_current is self:
-            if self.pressed and not self.collide_point(*touch.pos):
+            d = getattr(self, '_down', None)
+            slipped = d is not None and (abs(touch.x - d[0]) > TAP_SLOP or abs(touch.y - d[1]) > TAP_SLOP)
+            if self.pressed and (slipped or not self.collide_point(*touch.pos)):   # a drag is not a tap
                 self._set_pressed(False)
                 if self._long_ev:
                     self._long_ev.cancel()
@@ -753,8 +769,9 @@ class FieldInput(FloatLayout):
                 setattr(self.ti, attr, val)
             except Exception:
                 pass
+        self.on_resize = None                         # called when the field grows (long text wraps)
         self.shown = Txt(ltext=text or hint, color=TEXT if text else SUB, font_size=sp(17),
-                         align_mode='auto', size_hint=(None, None))
+                         align_mode='auto', nlines=4, size_hint=(None, None))
         self.add_widget(self.shown)
         self.add_widget(self.ti)
         self.ti.bind(text=self._on_text, on_text_validate=self._validate, focus=self._on_focus)
@@ -790,7 +807,21 @@ class FieldInput(FloatLayout):
             return
         self.shown.ltext = value or self.hint
         self.shown.color = TEXT if value else SUB
+        self._fit()
         self._draw_caret()
+
+    LINE_H = sp(17) * 1.3
+
+    def _fit(self):
+        """A long text wraps onto up to 4 lines and the field grows, so what is typed is always seen."""
+        n = 1
+        if self.ti.text and self.shown.width > 2:
+            n = max(1, len(self.shown.logical_lines()))
+        h = max(dp(52), n * self.LINE_H + dp(22))
+        if abs(h - self.height) > 0.5:
+            self.height = h
+            if self.on_resize:
+                self.on_resize()
 
     def _layout(self, *a):
         self._bg.pos = self.pos
@@ -800,6 +831,7 @@ class FieldInput(FloatLayout):
         self.shown.size = (self.width - 2 * pad, self.height)
         self.ti.pos = self.pos
         self.ti.size = self.size
+        self._fit()
         self._draw_caret()
 
     def _blink_tick(self, dt):
@@ -818,15 +850,19 @@ class FieldInput(FloatLayout):
             return
         txt = self.ti.text
         pad = dp(16)
-        w = self.shown.text_width() if txt else 0
+        lines = self.shown.logical_lines() if txt else ['']
+        last = lines[-1] if lines else ''
+        w = measure(textfix.fix(last), font_for(last), self.shown.font_size, False) if last else 0
         rtl = textfix.is_rtl(txt) if txt else True
         if rtl:
             x = (self.x + self.width) - pad - w - dp(2)
         else:
             x = self.x + pad + w + dp(1)
+        # the text block is centred vertically; the caret sits on its last line
+        cy = self.y + self.height / 2.0 - (len(lines) - 1) * self.LINE_H / 2.0
         with self.canvas.after:
             Color(*ACCENT)
-            Rectangle(pos=(x, (self.y + self.height / 2.0) - dp(11)), size=(dp(2), dp(22)))
+            Rectangle(pos=(x, cy - dp(11)), size=(dp(2), dp(22)))
 
 
 # ---------------------------------------------------------------------------
@@ -1289,13 +1325,14 @@ def make_scroll(**kw):
     """A ScrollView that can be dragged starting on a button.
 
     Kivy's default decides within 55 ms / 20 sp whether a touch is a scroll; a slower drag that
-    starts on a row is handed to the row as a *press* and the list never moves.  Here a touch
-    becomes a scroll after only a few dp of movement, and is handed to the row only when the
-    finger stays still for a good while (a plain tap is still passed on when it is released)."""
+    starts on a row is handed to the row as a *press* and the list never moves.  Here the touch
+    stays with the ScrollView however long the finger rests: it becomes a scroll after a few dp
+    of movement, and when the finger is lifted without moving it is handed to the row as a tap
+    (so a press is only ever a real tap, like on any Android list)."""
     kw.setdefault('do_scroll_x', False)
     kw.setdefault('bar_width', dp(3))
-    kw.setdefault('scroll_distance', dp(6))
-    kw.setdefault('scroll_timeout', 450)
+    kw.setdefault('scroll_distance', dp(7))
+    kw.setdefault('scroll_timeout', 60000)       # effectively never: only a release hands the touch to a row
     return ScrollView(**kw)
 
 
@@ -1672,6 +1709,7 @@ class PromptDialog(Dialog):
             root, title, message,
             buttons=[(ok_label, self._submit_btn, 'primary'), ('إلغاء', None, 'plain')], **kw)
         self.field = FieldInput(text=text, hint=hint, on_submit=self._submit_text)
+        self.field.on_resize = self.place
         self.set_extra(self.field)
         Clock.schedule_once(self._focus, 0.25)
 

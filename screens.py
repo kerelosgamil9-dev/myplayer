@@ -574,7 +574,7 @@ def share_keys(app, keys):
         app.root.say('لا توجد فيديوهات للمشاركة')
         return
     if not bridge.share_videos(vids):
-        app.root.say('تعذرت المشاركة')
+        app.root.say('تعذرت المشاركة: ' + (bridge.LAST_SHARE_ERROR[0] or ''))
 
 
 def selection_keys(ctx, lib):

@@ -684,46 +684,60 @@ def delete_videos(videos, callback):
 # ---------------------------------------------------------------------------
 # sharing
 # ---------------------------------------------------------------------------
+LAST_SHARE_ERROR = ['']
+
+
 def share_videos(videos):
     """Open the system share sheet with the given videos.  Returns how many were handed over
-    (0 when sharing is not possible here)."""
+    (0 when sharing is not possible); LAST_SHARE_ERROR[0] then holds the reason."""
+    LAST_SHARE_ERROR[0] = ''
     vids = [v for v in videos if v.get('id')]
-    if not ANDROID or not vids:
+    if not ANDROID:
+        LAST_SHARE_ERROR[0] = 'غير متاح خارج الأندرويد'
         return 0
-    try:
-        _share_ui(vids)
-        return len(vids)
-    except Exception:
-        log(traceback.format_exc())
+    if not vids:
+        LAST_SHARE_ERROR[0] = 'الفيديو بلا رابط نظام'
         return 0
+    errors = []
+    for variant in ('cast', 'plain', 'direct'):         # several ways: pyjnius is picky about overloads
+        try:
+            _share_now(vids, variant)
+            return len(vids)
+        except Exception as e:
+            errors.append('%s: %s' % (variant, str(e)[:90]))
+            log(traceback.format_exc())
+    LAST_SHARE_ERROR[0] = ' | '.join(errors)[:260]
+    return 0
 
 
-@run_on_ui_thread
-def _share_ui(vids):
-    try:
-        Intent = autoclass('android.content.Intent')
-        ContentUris = autoclass('android.content.ContentUris')
-        MS = autoclass('android.provider.MediaStore$Video$Media')
-        Parcelable = autoclass('android.os.Parcelable')
-        from jnius import cast
-        uris = [ContentUris.withAppendedId(MS.EXTERNAL_CONTENT_URI, int(v['id'])) for v in vids]
-        if len(uris) == 1:
-            it = Intent(Intent.ACTION_SEND)
-            it.setType('video/*')
-            it.putExtra(Intent.EXTRA_STREAM, cast(Parcelable, uris[0]))
-        else:
-            ArrayList = autoclass('java.util.ArrayList')
-            lst = ArrayList()
-            for u in uris:
-                lst.add(cast(Parcelable, u))
-            it = Intent(Intent.ACTION_SEND_MULTIPLE)
-            it.setType('video/*')
-            it.putParcelableArrayListExtra(Intent.EXTRA_STREAM, lst)
-        it.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        chooser = Intent.createChooser(it, 'مشاركة')
-        _activity().startActivity(chooser)
-    except Exception:
-        log(traceback.format_exc())
+def _share_now(vids, variant):
+    from jnius import cast
+    Intent = autoclass('android.content.Intent')
+    ContentUris = autoclass('android.content.ContentUris')
+    MS = autoclass('android.provider.MediaStore$Video$Media')
+    uris = [ContentUris.withAppendedId(MS.EXTERNAL_CONTENT_URI, int(v['id'])) for v in vids]
+
+    def parcel(u):
+        return cast('android.os.Parcelable', u) if variant != 'plain' else u
+    if len(uris) == 1:
+        it = Intent(Intent.ACTION_SEND)
+        it.setType('video/*')
+        it.putExtra(Intent.EXTRA_STREAM, parcel(uris[0]))
+    else:
+        ArrayList = autoclass('java.util.ArrayList')
+        lst = ArrayList()
+        for u in uris:
+            lst.add(parcel(u))
+        it = Intent(Intent.ACTION_SEND_MULTIPLE)
+        it.setType('video/*')
+        it.putParcelableArrayListExtra(Intent.EXTRA_STREAM, lst)
+    it.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    if variant == 'direct':
+        _activity().startActivity(it)
+        return
+    String = autoclass('java.lang.String')
+    title = cast('java.lang.CharSequence', String('مشاركة'))
+    _activity().startActivity(Intent.createChooser(it, title))
 
 
 # ---------------------------------------------------------------------------

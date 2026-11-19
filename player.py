@@ -1303,7 +1303,7 @@ class PlayerPage(Page):
     def share(self):
         v = self.lib.videos.get(self.key)
         if not v or not bridge.share_videos([v]):
-            self.app.root.say('تعذرت المشاركة')
+            self.app.root.say('تعذرت المشاركة: ' + (bridge.LAST_SHARE_ERROR[0] or ''))
 
     def info(self):
         v = self.lib.videos.get(self.key, {})
