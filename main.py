@@ -29,7 +29,7 @@ try:
     import bridge                                                 # noqa: E402
     import core                                                   # noqa: E402
     import widgets                                                # noqa: E402
-    from screens import CollectionPage, HomePage, PickerPage, Root   # noqa: E402
+    from screens import CollectionPage, GroupPage, HomePage, PickerPage, Root   # noqa: E402
 except Exception:
     IMPORT_ERROR = traceback.format_exc()
     core = None
@@ -175,6 +175,9 @@ class ProPlayerApp(App):
 
     def open_collection(self, cid):
         self.root.push(CollectionPage(self, cid))
+
+    def open_group(self, gid):
+        self.root.push(GroupPage(self, gid))
 
     def open_picker(self, cid, new_name=None):
         self.root.push(PickerPage(self, cid, new_name=new_name))

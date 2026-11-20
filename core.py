@@ -86,6 +86,19 @@ def fmt_speed(s):
     return txt + '×'
 
 
+def count_lists_label(n):
+    n = int(n)
+    if n == 0:
+        return 'لا توجد قوائم'
+    if n == 1:
+        return 'قائمة واحدة'
+    if n == 2:
+        return 'قائمتان'
+    if 3 <= n <= 10:
+        return '%d قوائم' % n
+    return '%d قائمة' % n
+
+
 def count_videos_label(n):
     """Arabic plural forms for 'video clips' (like the original app)."""
     n = int(n)
@@ -278,7 +291,7 @@ def load_subtitle(path):
 # ---------------------------------------------------------------------------
 # persistence
 # ---------------------------------------------------------------------------
-BUILD = 'r4'                # shown at the bottom of the settings: tells which upload is installed
+BUILD = 'r6'                # shown at the bottom of the settings: tells which upload is installed
 MIN_RESUME = 3.0          # seconds: less than this watched = starts from zero, no progress bar
 
 
@@ -310,6 +323,7 @@ class Store(object):
             'coll_order': [],
             'hidden_colls': [],
             'deleted_playlists': {},
+            'groups': {},
             'settings': {},
         }
 
@@ -434,6 +448,7 @@ class Collection(object):
         self.kind = kind          # 'auto' | 'custom'
         self.keys = keys          # ordered video keys (already filtered)
         self.path = path
+        self.lists = []           # for a group ('g:<id>'): the Collections it holds
 
     @property
     def count(self):
@@ -652,6 +667,8 @@ class Library(object):
         return res
 
     def collection(self, cid):
+        if cid.startswith('g:'):
+            return self.group(cid)
         for c in self.collections():
             if c.id == cid:
                 return c
@@ -659,6 +676,83 @@ class Library(object):
             if c.id == cid:
                 return c
         return None
+
+    # ---- groups ("المجلدات"): a named set of lists --------------------------------
+    def _make_group(self, gid, g, by_id=None):
+        if by_id is None:
+            by_id = {c.id: c for c in self.collections()}
+        lists = [by_id[cid] for cid in g.get('lists', []) if cid in by_id]
+        seen, keys = set(), []
+        for c in lists:
+            for k in c.keys:
+                if k not in seen:
+                    seen.add(k)
+                    keys.append(k)
+        grp = Collection('g:' + gid, g.get('name', '?'), 'group', keys)
+        grp.lists = lists
+        return grp
+
+    def groups(self):
+        by_id = {c.id: c for c in self.collections()}
+        res = [self._make_group(gid, g, by_id) for gid, g in self.store.data['groups'].items()]
+        res.sort(key=lambda c: natural_key(c.name))
+        return res
+
+    def group(self, cid):
+        gid = cid[2:] if cid.startswith('g:') else cid
+        g = self.store.data['groups'].get(gid)
+        return self._make_group(gid, g) if g is not None else None
+
+    def create_group(self, name, cids):
+        gid = uuid.uuid4().hex[:10]
+        seen, lists = set(), []
+        for c in cids:
+            if c not in seen:
+                seen.add(c)
+                lists.append(c)
+        self.store.data['groups'][gid] = {'id': gid, 'name': (name or '').strip() or 'مجلد جديد',
+                                          'lists': lists, 'created': time.time()}
+        self.store.mark()
+        return 'g:' + gid
+
+    def rename_group(self, cid, name):
+        g = self.store.data['groups'].get(cid[2:])
+        name = (name or '').strip()
+        if g is not None and name:
+            g['name'] = name
+            self.store.mark()
+
+    def delete_group(self, cid):
+        """Only the folder goes; the lists inside it (and all videos) stay."""
+        if self.store.data['groups'].pop(cid[2:], None) is not None:
+            self.store.mark()
+
+    def add_to_group(self, cid, list_ids):
+        g = self.store.data['groups'].get(cid[2:])
+        if g is None:
+            return 0
+        n = 0
+        for c in list_ids:
+            if c not in g['lists']:
+                g['lists'].append(c)
+                n += 1
+        if n:
+            self.store.mark()
+        return n
+
+    def remove_from_group(self, cid, list_ids):
+        g = self.store.data['groups'].get(cid[2:])
+        if g is not None:
+            drop = set(list_ids)
+            g['lists'] = [c for c in g['lists'] if c not in drop]
+            self.store.mark()
+
+    def set_group_order(self, cid, list_ids):
+        g = self.store.data['groups'].get(cid[2:])
+        if g is not None:
+            rest = [c for c in g['lists'] if c not in set(list_ids)]
+            g['lists'] = list(list_ids) + rest
+            self.store.mark()
 
     def set_collections_order(self, ids):
         self.store.data['coll_order'] = list(ids)

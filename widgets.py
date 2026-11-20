@@ -21,7 +21,6 @@ from kivy.properties import (BooleanProperty, ListProperty, NumericProperty,
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.label import Label
-from kivy.uix.scrollview import ScrollView
 from kivy.uix.stencilview import StencilView
 from kivy.uix.textinput import TextInput
 from kivy.uix.widget import Widget
@@ -387,6 +386,18 @@ class Tap(Widget):
         if self.long_callback:
             self._long_ev = Clock.schedule_once(self._long, 0.45)
         return True
+
+    def tap_now(self):
+        """A tap decided by a scroll container (it tracked the finger itself): flash, then call back."""
+        if self.disabled:
+            return
+        self._set_pressed(True)
+        Clock.schedule_once(self._unflash, 0.09)
+        if self.callback:
+            self.callback(self)
+
+    def _unflash(self, dt):
+        self._set_pressed(False)
 
     def _long(self, dt):
         self._long_ev = None
@@ -1322,36 +1333,249 @@ class VList(StencilView):
 # overlays: sheet / dialogs / toast
 # ---------------------------------------------------------------------------
 def make_scroll(**kw):
-    """A ScrollView that can be dragged starting on a button.
-
-    Kivy's default decides within 55 ms / 20 sp whether a touch is a scroll; a slower drag that
-    starts on a row is handed to the row as a *press* and the list never moves.  Here the touch
-    stays with the ScrollView however long the finger rests: it becomes a scroll after a few dp
-    of movement, and when the finger is lifted without moving it is handed to the row as a tap
-    (so a press is only ever a real tap, like on any Android list)."""
-    kw.setdefault('do_scroll_x', False)
-    kw.setdefault('bar_width', dp(3))
-    kw.setdefault('scroll_distance', dp(7))
-    kw.setdefault('scroll_timeout', 60000)       # effectively never: only a release hands the touch to a row
-    return SmoothScroll(**kw)
+    """The scrolling container used by sheets and the settings (see PlainScroll)."""
+    return PlainScroll(**kw)
 
 
-class SmoothScroll(ScrollView):
-    """ScrollView that cannot get stuck in 'a touch is already being tracked' state.
+class PlainScroll(StencilView):
+    """Vertical scroller that owns its touches, exactly like VList does.
 
-    Kivy hands a new touch straight to the rows (a press) when it still believes an older touch
-    is active; if that older touch's release was ever lost, every later drag starting on a row
-    would count as a press.  Here a tracked touch that has ended, or that has been silent for
-    two seconds while a new finger lands, is forgotten."""
+    Kivy's ScrollView hands a touch to the rows as a *press* in several situations (the finger
+    rested a moment, an earlier touch was lost, ...), after which the list can no longer scroll.
+    Here no row ever sees a touch: the container tracks the finger itself.  Moving more than a few
+    dp scrolls (with a fling on release); lifting the finger without moving is a tap, which is
+    delivered to the Tap widget under the finger.  The content (``box``) keeps its normal layout
+    position; scrolling only moves one Translate.
+    """
+
+    THRESH = dp(9)
+
+    def __init__(self, **kw):
+        kw.setdefault('size_hint', (1, 1))
+        super(PlainScroll, self).__init__(**kw)
+        self.box = None
+        self.offset = 0.0
+        self._t = None
+        self._fling = None
+        self._fling_v = 0.0
+        self._hl_ev = None
+        self._long_ev = None
+        self._bar_ev = None
+        self._holder = Widget(size_hint=(None, None), size=(0, 0))
+        with self._holder.canvas.before:
+            PushMatrix()
+            self._shift = Translate(0, 0)
+        with self._holder.canvas.after:
+            PopMatrix()
+        super(PlainScroll, self).add_widget(self._holder)
+        self._bar = Widget(size_hint=(None, None), size=(0, 0))
+        with self._bar.canvas:
+            self._bar_col = Color(1, 1, 1, 0)
+            self._bar_rect = RoundedRectangle(pos=(0, 0), size=(0, 0), radius=[dp(2)])
+        super(PlainScroll, self).add_widget(self._bar)
+        self.bind(pos=self._sync, size=self._sync)
+
+    # ---- content ---------------------------------------------------------------
+    def add_widget(self, widget, *a, **k):
+        if self.box is not None:
+            self._holder.remove_widget(self.box)
+            self.box.unbind(height=self._sync)
+        self.box = widget
+        widget.size_hint_x = None
+        self._holder.add_widget(widget)
+        widget.bind(height=self._sync)
+        self._sync()
+
+    def max_offset(self):
+        b = self.box
+        return max(0.0, (b.height if b is not None else 0.0) - self.height)
+
+    def _get_scroll_y(self):
+        m = self.max_offset()
+        return 1.0 if m <= 0 else 1.0 - self.offset / m
+
+    def _set_scroll_y(self, v):
+        self.offset = (1.0 - max(0.0, min(1.0, v))) * self.max_offset()
+        self._apply()
+
+    scroll_y = property(_get_scroll_y, _set_scroll_y)
+
+    def _sync(self, *a):
+        b = self.box
+        if b is None:
+            return
+        if b.width != self.width:
+            b.width = self.width
+        b.pos = (self.x, self.top - b.height)
+        self._apply()
+
+    def _apply(self):
+        self.offset = max(0.0, min(self.max_offset(), self.offset))
+        y = float(round(self.offset))
+        if self._shift.y != y:
+            self._shift.y = y
+        self._draw_bar()
+
+    def scroll_to_top(self):
+        self.offset = 0.0
+        self._apply()
+
+    # ---- scroll bar ----------------------------------------------------------------
+    def _draw_bar(self):
+        m = self.max_offset()
+        if m <= 0 or self._bar_ev is None:
+            self._bar_col.a = 0
+            return
+        h = self.height
+        total = self.box.height
+        bh = max(dp(28), h * h / total)
+        by = self.top - bh - (h - bh) * (self.offset / m)
+        self._bar_rect.pos = (self.right - dp(5), by)
+        self._bar_rect.size = (dp(3), bh)
+        self._bar_col.a = 0.32
+
+    def _show_bar(self):
+        if self._bar_ev is not None:
+            self._bar_ev.cancel()
+        self._bar_ev = Clock.schedule_once(self._hide_bar, 0.8)
+        self._draw_bar()
+
+    def _hide_bar(self, dt):
+        self._bar_ev = None
+        self._bar_col.a = 0
+
+    # ---- touch -----------------------------------------------------------------------
+    def _find(self, w, x, y):
+        """Deepest Tap widget under (x, y) in the content's own coordinates."""
+        for c in w.children:                    # topmost first
+            if c.disabled or c.opacity == 0 or not c.collide_point(x, y):
+                continue
+            r = self._find(c, x, y)
+            if r is not None:
+                return r
+        if isinstance(w, Tap) and not w.disabled and (w.callback or w.long_callback) and w.collide_point(x, y):
+            return w
+        return None
+
+    def _clear_target(self):
+        for ev in (self._hl_ev, self._long_ev):
+            if ev is not None:
+                ev.cancel()
+        self._hl_ev = None
+        self._long_ev = None
+        t = self._t
+        if t and t.get('tgt') is not None and t['tgt'].pressed:
+            t['tgt']._set_pressed(False)
+
+    def _highlight(self, dt):
+        self._hl_ev = None
+        t = self._t
+        if t and t['state'] == 'pending' and t['tgt'] is not None:
+            t['tgt']._set_pressed(True)
+
+    def _long_fire(self, dt):
+        self._long_ev = None
+        t = self._t
+        if t and t['state'] == 'pending' and t['tgt'] is not None and t['tgt'].long_callback:
+            t['state'] = 'done'
+            tgt = t['tgt']
+            tgt._set_pressed(False)
+            tgt.long_callback(tgt)
 
     def on_touch_down(self, touch):
-        t = getattr(self, '_touch', None)
-        if t and t is not touch:
-            ended = getattr(t, 'time_end', -1) != -1
-            silent = time.time() - getattr(t, 'time_update', time.time()) > 2.0     # no news for 2 s
-            if ended or silent:
-                self._touch = None
-        return super(SmoothScroll, self).on_touch_down(touch)
+        if not self.collide_point(*touch.pos):
+            return False
+        btn = getattr(touch, 'button', None)
+        if btn in ('scrollup', 'scrolldown'):
+            self.offset += (-1 if btn == 'scrollup' else 1) * dp(90)
+            self._apply()
+            return True
+        if self._t is not None:                 # stale state from a lost touch
+            self._clear_target()
+            self._t = None
+        was_moving = self._fling is not None
+        self._stop_fling()
+        touch.grab(self)
+        tgt = None
+        if not was_moving and self.box is not None:         # a touch that stops a fling is not a tap
+            tgt = self._find(self.box, touch.x, touch.y - self._shift.y)
+        self._t = {'uid': touch.uid, 'state': 'pending' if not was_moving else 'stopper',
+                   'sx': touch.x, 'sy': touch.y, 'last_y': touch.y, 'tgt': tgt,
+                   'samples': [(time.time(), touch.y)]}
+        if tgt is not None:
+            self._hl_ev = Clock.schedule_once(self._highlight, 0.08)
+            if tgt.long_callback:
+                self._long_ev = Clock.schedule_once(self._long_fire, 0.45)
+        return True
+
+    def on_touch_move(self, touch):
+        t = self._t
+        if touch.grab_current is not self or not t or t['uid'] != touch.uid:
+            return False
+        if t['state'] in ('pending', 'stopper'):
+            if abs(touch.y - t['sy']) > self.THRESH or abs(touch.x - t['sx']) > self.THRESH:
+                self._clear_target()
+                t['state'] = 'scroll'
+        if t['state'] == 'scroll':
+            self.offset += touch.y - t['last_y']
+            self._apply()
+            self._show_bar()
+            t['samples'].append((time.time(), touch.y))
+            if len(t['samples']) > 6:
+                t['samples'].pop(0)
+        t['last_y'] = touch.y
+        return True
+
+    def on_touch_up(self, touch):
+        t = self._t
+        if touch.grab_current is not self or not t or t['uid'] != touch.uid:
+            return False
+        touch.ungrab(self)
+        self._t = None
+        st = t['state']
+        tgt = t['tgt']
+        for ev in (self._hl_ev, self._long_ev):
+            if ev is not None:
+                ev.cancel()
+        self._hl_ev = None
+        self._long_ev = None
+        if st == 'pending':
+            if tgt is not None:
+                tgt._set_pressed(False)
+                tgt.tap_now()
+        elif st == 'scroll':
+            s = t['samples']
+            if len(s) >= 2:
+                dt = s[-1][0] - s[0][0]
+                if dt > 0.001:
+                    v = (s[-1][1] - s[0][1]) / dt
+                    if abs(v) > dp(120):
+                        self._start_fling(v)
+        elif tgt is not None and tgt.pressed:
+            tgt._set_pressed(False)
+        return True
+
+    # ---- fling -------------------------------------------------------------------------
+    def _start_fling(self, v):
+        self._fling_v = max(-dp(6000), min(dp(6000), v))
+        if self._fling is None:
+            self._fling = Clock.schedule_interval(self._fling_tick, 0)
+
+    def _stop_fling(self):
+        if self._fling is not None:
+            self._fling.cancel()
+            self._fling = None
+        self._fling_v = 0.0
+
+    def _fling_tick(self, dt):
+        dt = min(dt, 0.05)
+        want = self.offset + self._fling_v * dt
+        self._fling_v *= 0.94 ** (dt * 60.0)
+        self.offset = want
+        self._apply()
+        self._show_bar()
+        if abs(self._fling_v) < dp(25) or self.offset != want:
+            self._stop_fling()
 
 
 class Overlay(FloatLayout):

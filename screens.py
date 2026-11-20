@@ -357,6 +357,9 @@ class CollRow(ListRow):
         self.title.size = (w, dp(30))
         self.info.pos = (left, cy - dp(30))
         self.info.size = (w, dp(30))
+        self.draw_peek(tw)
+
+    def draw_peek(self, tw):
         self.canvas.after.clear()
         top = self.thumb.y + self.thumb.height
         with self.canvas.after:               # two cards peeking out behind the cover: "a stack"
@@ -368,12 +371,48 @@ class CollRow(ListRow):
                              radius=[dp(5), dp(5), 0, 0])
 
 
+class GroupRow(CollRow):
+    """A folder ("مجلد") of lists: a cover with a folder tab and a folder badge."""
+    kind = 'group'
+
+    def __init__(self, **kw):
+        super(GroupRow, self).__init__(**kw)
+        self.badge = Icon(name='folder', color=[1, 1, 1, 0.95], size=(dp(22), dp(22)), stroke=1.8)
+        self.add_widget(self.badge)
+
+    def fill(self, item, idx, ctx):
+        c = item['coll']
+        self.title.ltext = c.name
+        self.info.ltext = core.count_lists_label(len(c.lists)) + '  •  ' + core.count_videos_label(c.count)
+        cover = None
+        for lst in c.lists:
+            cover = ctx.lib.cover_key(lst.keys)
+            if cover:
+                break
+        self.set_thumb_for(self.thumb, cover)
+
+    def draw_peek(self, tw):
+        self.canvas.after.clear()
+        top = self.thumb.y + self.thumb.height
+        with self.canvas.after:               # the tab of a folder, sticking out at the top
+            Color(0.29, 0.30, 0.35, 1)
+            RoundedRectangle(pos=(self.thumb.x + tw - dp(64), top - dp(1)), size=(dp(54), dp(9)),
+                             radius=[dp(6), dp(6), 0, 0])
+        self.badge.center = (self.thumb.x + dp(22), self.thumb.y + dp(22))
+        self.badge.canvas.before.clear()
+        with self.badge.canvas.before:         # dark disc so the badge reads on any cover
+            Color(0, 0, 0, 0.62)
+            Ellipse(pos=(self.badge.center_x - dp(16), self.badge.center_y - dp(16)), size=(dp(32), dp(32)))
+
+
 class CreateRow(Row):
     kind = 'create'
 
+    LABEL = 'إنشاء قائمة التشغيل الخاصة بك'
+
     def __init__(self, **kw):
         super(CreateRow, self).__init__(**kw)
-        self.label = Txt(ltext='إنشاء قائمة التشغيل الخاصة بك', font_size=sp(16), bold=True, nlines=2,
+        self.label = Txt(ltext=self.LABEL, font_size=sp(16), bold=True, nlines=2,
                          size_hint=(None, None))
         self.plus = Icon(name='plus', color=list(ACCENT), size=(dp(34), dp(34)), stroke=1.9)
         self.add_widget(self.label)
@@ -397,7 +436,13 @@ class CreateRow(Row):
         self.label.size = (x - dp(16) - self.x - dp(16), dp(40))
 
 
-ROW_FACTORIES = {'video': VideoRow, 'coll': CollRow, 'create': CreateRow}
+class GCreateRow(CreateRow):
+    kind = 'gcreate'
+    LABEL = 'إنشاء مجلد جديد'
+
+
+ROW_FACTORIES = {'video': VideoRow, 'coll': CollRow, 'create': CreateRow, 'group': GroupRow,
+                 'gcreate': GCreateRow}
 
 
 # ---------------------------------------------------------------------------
@@ -521,6 +566,65 @@ def choose_playlist(app, keys, after=None):
             done('تم إنشاء «%s» (%d فيديو)' % (lib.collection(cid).name, len(keys)))
         ask_text(app, 'قائمة تشغيل جديدة', '', 'اسم القائمة', ok, 'إنشاء')
     sheet.show()
+
+
+def pick_lists(app, title, candidates, ok_label, on_done):
+    """Sheet with lists to tick (at least one); on_done(list_of_ids) when confirmed."""
+    if not candidates:
+        app.root.say('لا توجد قوائم تشغيل لإضافتها')
+        return
+    chosen = []
+    ids = [c.id for c in candidates]
+
+    def build():
+        n = len(chosen)
+        rows = [SheetTitle(title),
+                SheetButton('%s (%d)' % (ok_label, n) if n else 'اختر قائمة واحدة على الأقل',
+                            callback=lambda w: go(), enabled=bool(n)),
+                SheetRow('إلغاء تحديد الكل' if n == len(ids) else 'تحديد الكل', icon='select_all',
+                         callback=lambda w: toggle_all())]
+        for c in candidates:
+            rows.append(SheetRow(c.name, icon='playlist', value=core.count_videos_label(c.count),
+                                 checked=c.id in chosen, callback=lambda w, cid=c.id: toggle(cid)))
+        return rows
+    sheet = MenuSheet(app.root, build)
+
+    def toggle(cid):
+        if cid in chosen:
+            chosen.remove(cid)
+        else:
+            chosen.append(cid)
+        sheet.rebuild()
+
+    def toggle_all():
+        if len(chosen) == len(ids):
+            del chosen[:]
+        else:
+            chosen[:] = list(ids)
+        sheet.rebuild()
+
+    def go():
+        if not chosen:
+            return
+        sheet.dismiss()
+        on_done(list(chosen))
+    sheet.show()
+
+
+def new_group_flow(app, after=None):
+    """Ask for a name, then for the lists to put in the new folder."""
+    lib = app.lib
+
+    def named(name):
+        def picked(cids):
+            gid = lib.create_group(name, cids)
+            app.store.save()
+            app.root.say('تم إنشاء المجلد «%s»' % lib.group(gid).name)
+            app.root.refresh_pages()
+            if after:
+                after(gid)
+        pick_lists(app, 'اختر قوائم المجلد', lib.collections(), 'إنشاء المجلد', picked)
+    ask_text(app, 'مجلد جديد', '', 'اسم المجلد', named, 'التالي')
 
 
 def sort_sheet(app, title, modes, get_state, set_state, extra=None):
@@ -837,7 +941,7 @@ class SettingsPane(FloatLayout):
         self.card('القوائم', [
             SheetRow('استعادة القوائم المحذوفة', icon='restore',
                      value=('%d' % n_back) if n_back else '', callback=lambda w: self.restore())])
-        box.add_widget(SheetLabel('Pro Player  •  بناء %s  •  %d' % (core.BUILD, int(self.sv.scroll_timeout)), muted=True))
+        box.add_widget(SheetLabel('Pro Player  •  بناء %s' % core.BUILD, muted=True))
 
     def pick_number(self, key, title, options, fmt):
         cur = self.S(key)
@@ -928,7 +1032,7 @@ class ListPageMixin(object):
         k = item.get('kind')
         if k == 'video':
             return item['key']
-        if k == 'coll':
+        if k in ('coll', 'group'):
             return item['coll'].id
         return None
 
@@ -1023,7 +1127,7 @@ def delete_videos_dialog(app, keys, after):
 # Home page
 # ---------------------------------------------------------------------------
 class HomePage(Page, ListPageMixin):
-    TABS = [('videos', 'مقاطع فيديو'), ('playlists', 'قوائم التشغيل')]
+    TABS = [('videos', 'مقاطع فيديو'), ('playlists', 'قوائم التشغيل'), ('groups', 'المجلدات')]
     NAVS = [('library', 'folder_play', 'على الجهاز'), ('history', 'clock', 'السجل'), ('me', 'person', 'الإعدادات')]
 
     def __init__(self, app, **kw):
@@ -1154,6 +1258,12 @@ class HomePage(Page, ListPageMixin):
             for c in lib.collections():
                 if self._match(c.name):
                     items.append({'kind': 'coll', 'coll': c})
+        elif self.mode == 'groups':
+            if not self.query:
+                items.append({'kind': 'gcreate'})
+            for c in lib.groups():
+                if self._match(c.name):
+                    items.append({'kind': 'group', 'coll': c})
         elif self.mode == 'folders':
             for c in lib.folders():
                 if self._match(c.name):
@@ -1173,7 +1283,7 @@ class HomePage(Page, ListPageMixin):
         self.vlist.reorderable = self.ctx.reorder
         items = self.build_items()
         self.vlist.set_items(items)
-        if not items or (len(items) == 1 and items[0]['kind'] == 'create'):
+        if not items or (len(items) == 1 and items[0]['kind'] in ('create', 'gcreate')):
             if not self.app.loaded:
                 self.empty.icon.name = 'clock'
                 self.empty.ltext = 'جارٍ تحميل الفيديوهات…'
@@ -1186,6 +1296,9 @@ class HomePage(Page, ListPageMixin):
             elif self.query:
                 self.empty.icon.name = 'search'
                 self.empty.ltext = 'لا توجد نتائج'
+            elif self.mode == 'groups':
+                self.empty.icon.name = 'folder'
+                self.empty.ltext = 'لا توجد مجلدات بعد.\nاضغط «إنشاء مجلد جديد» لتجميع عدة قوائم تحت اسم واحد.'
             else:
                 self.empty.icon.name = 'folder_play'
                 self.empty.ltext = 'لا توجد فيديوهات'
@@ -1213,7 +1326,7 @@ class HomePage(Page, ListPageMixin):
             self.header.set('الإعدادات', '', [], [])
         else:
             left = [self.btn_menu, self.btn_search]
-            if self.mode != 'folders':
+            if self.mode not in ('folders', 'groups'):
                 left.append(self.btn_sort)
             self.header.set('على الجهاز', '', [], left, big=True)
 
@@ -1222,6 +1335,11 @@ class HomePage(Page, ListPageMixin):
         btns = [IconButton('select_all', callback=lambda w: self.select_all())]
         videos = self.nav == 'history' or self.mode == 'videos'
         btns.append(IconButton('share', callback=lambda w: self.act_share()))
+        if self.mode == 'groups' and self.nav == 'library':
+            if n == 1:
+                btns.append(IconButton('edit', callback=lambda w: self.act_rename()))
+            btns.append(IconButton('trash', color=DANGER, callback=lambda w: self.act_delete()))
+            return btns
         if videos:
             btns.append(IconButton('playlist_add', callback=lambda w: self.act_add()))
             if n == 1:
@@ -1308,6 +1426,10 @@ class HomePage(Page, ListPageMixin):
                 # a playlist only exists once it has videos: pick them first
                 self.app.open_picker(None, new_name=name)
             ask_text(self.app, 'قائمة تشغيل جديدة', '', 'اسم القائمة', ok, 'التالي')
+        elif k == 'gcreate':
+            new_group_flow(self.app, after=lambda gid: self.app.open_group(gid))
+        elif k == 'group':
+            self.app.open_group(item['coll'].id)
         elif k == 'coll':
             self.app.open_collection(item['coll'].id)
         elif k == 'video':
@@ -1356,7 +1478,16 @@ class HomePage(Page, ListPageMixin):
             self.app.store.save()
             self.exit_selection()
             self.rebuild()
-        if self.mode == 'playlists' and self.nav == 'library':
+        if self.mode == 'groups' and self.nav == 'library':
+            g = lib.group(sid)
+            if g is None:
+                return
+
+            def ok_g(name):
+                lib.rename_group(sid, name)
+                after()
+            ask_text(self.app, 'تعديل اسم المجلد', g.name, 'اسم المجلد', ok_g)
+        elif self.mode == 'playlists' and self.nav == 'library':
             c = lib.collection(sid)
             if c is None:
                 return
@@ -1379,6 +1510,16 @@ class HomePage(Page, ListPageMixin):
             app.root.refresh_pages()
         if self.nav == 'history' or self.mode == 'videos':
             delete_videos_dialog(app, ids, after)
+            return
+        if self.mode == 'groups':
+            def ok_g():
+                for gid in ids:
+                    lib.delete_group(gid)
+                app.root.say('تم حذف %d مجلد (القوائم والفيديوهات لم تُحذف)' % len(ids))
+                after()
+            confirm(app, 'حذف مجلدات',
+                    'سيتم حذف %d مجلد فقط. القوائم التي بداخلها والفيديوهات تبقى كما هي.' % len(ids),
+                    'حذف', ok_g)
             return
 
         def ok():
@@ -1630,6 +1771,169 @@ class CollectionPage(Page, ListPageMixin):
             app.store.save()
             self.exit_selection()
             app.root.refresh_pages()
+        sheet.show()
+
+
+class GroupPage(Page, ListPageMixin):
+    """One folder ("مجلد"): the lists that were put together under a name chosen by the user."""
+
+    def __init__(self, app, cid, **kw):
+        super(GroupPage, self).__init__(app, **kw)
+        self.cid = cid
+        self.init_list()
+        self.ctx.reorder = True          # long press + move = reorder the lists
+        self.vlist.reorderable = True
+        self.header = Header()
+        self.empty = EmptyState('folder')
+        for w in (self.vlist, self.header, self.empty):
+            self.add_widget(w)
+        self.btn_back = IconButton('back', callback=lambda w: self.app.root.back())
+        self.btn_close = IconButton('close', callback=lambda w: self.exit_selection())
+        self.btn_add = IconButton('plus', callback=lambda w: self.add_lists())
+        self.btn_menu = IconButton('dots', callback=lambda w: self.more_menu())
+        self.bind(pos=self._lay, size=self._lay)
+        self._lay()
+
+    @property
+    def group(self):
+        return self.app.lib.group(self.cid)
+
+    def _lay(self, *a):
+        hh = dp(64)
+        self.header.size = (self.width, hh)
+        self.header.pos = (self.x, (self.y + self.height) - hh)
+        self.vlist.pos = self.pos
+        self.vlist.size = (self.width, max(0, (self.y + self.height) - hh - self.y))
+        self.empty.pos = (self.x + dp(30), self.vlist.y + self.vlist.height * 0.4)
+        self.empty.size = (self.width - dp(60), dp(80))
+
+    def on_show(self):
+        self.refresh()
+
+    def on_resume(self):
+        self.refresh()
+
+    def on_back(self):
+        if self.ctx.sel_mode:
+            self.exit_selection()
+            return True
+        return False
+
+    def refresh(self):
+        g = self.group
+        if g is None:
+            Clock.schedule_once(lambda dt: self.app.root.pop(), 0)
+            return
+        self.vlist.reorderable = bool(self.ctx.sel_mode)
+        self.vlist.set_items([{'kind': 'coll', 'coll': c} for c in g.lists])
+        self.empty.ltext = '' if g.lists else 'المجلد فارغ.\nاضغط + لإضافة قوائم تشغيل.'
+        self.update_header()
+
+    def update_header(self):
+        g = self.group
+        if g is None:
+            return
+        if self.ctx.sel_mode:
+            n = len(self.ctx.selected)
+            left = [IconButton('select_all', callback=lambda w: self.select_all()),
+                    IconButton('share', callback=lambda w: self.act_share()),
+                    IconButton('trash', color=DANGER, callback=lambda w: self.act_remove())]
+            self.header.set('%d محدد' % n, '', [self.btn_close], left)
+            return
+        sub = core.count_lists_label(len(g.lists)) + '  •  ' + core.count_videos_label(g.count)
+        self.header.set(g.name, sub, [self.btn_back], [self.btn_menu, self.btn_add])
+
+    def on_selection_changed(self):
+        self.vlist.reorderable = bool(self.ctx.sel_mode)
+        self.update_header()
+        self.vlist.refresh()
+
+    def open_item(self, idx, item):
+        self.app.open_collection(item['coll'].id)
+
+    def _reorder(self, src, dst):
+        items = list(self.vlist.items)
+        it = items.pop(src)
+        items.insert(dst, it)
+        self.app.lib.set_group_order(self.cid, [i['coll'].id for i in items])
+        self.app.store.save()
+        self.vlist.set_items(items)
+
+    def add_lists(self):
+        lib, app = self.app.lib, self.app
+        g = self.group
+        have = set(c.id for c in g.lists) if g else set()
+        cands = [c for c in lib.collections() if c.id not in have]
+        if not cands:
+            app.root.say('كل القوائم موجودة بالفعل في هذا المجلد')
+            return
+
+        def done(cids):
+            n = lib.add_to_group(self.cid, cids)
+            app.store.save()
+            app.root.say('تمت إضافة %d قائمة' % n)
+            self.refresh()
+            app.root.refresh_pages()
+        pick_lists(app, 'إضافة قوائم إلى المجلد', cands, 'إضافة', done)
+
+    def act_share(self):
+        lib = self.app.lib
+        keys, seen = [], set()
+        for cid in self.ctx.selected:
+            c = lib.collection(cid)
+            for k in (c.keys if c else []):
+                if k not in seen:
+                    seen.add(k)
+                    keys.append(k)
+        share_keys(self.app, keys)
+
+    def act_remove(self):
+        ids = list(self.ctx.selected)
+        lib, app = self.app.lib, self.app
+
+        def ok():
+            lib.remove_from_group(self.cid, ids)
+            app.store.save()
+            app.root.say('تمت الإزالة من المجلد (القوائم لم تُحذف)')
+            self.exit_selection()
+            self.refresh()
+            app.root.refresh_pages()
+        confirm(app, 'إزالة من المجلد',
+                'سيتم إخراج %d قائمة من هذا المجلد فقط. القوائم والفيديوهات تبقى كما هي.' % len(ids),
+                'إزالة', ok)
+
+    def more_menu(self):
+        lib, app = self.app.lib, self.app
+
+        def build():
+            return [SheetTitle('المجلد'),
+                    SheetRow('إضافة قوائم', icon='plus', callback=lambda w: (sheet.dismiss(), self.add_lists())),
+                    SheetRow('تعديل الاسم', icon='edit', callback=lambda w: (sheet.dismiss(), rename())),
+                    SheetRow('حذف المجلد', icon='trash', danger=True,
+                             callback=lambda w: (sheet.dismiss(), delete()))]
+        sheet = MenuSheet(app.root, build)
+
+        def rename():
+            g = self.group
+            if g is None:
+                return
+
+            def ok(name):
+                lib.rename_group(self.cid, name)
+                app.store.save()
+                self.refresh()
+                app.root.refresh_pages()
+            ask_text(app, 'تعديل اسم المجلد', g.name, 'اسم المجلد', ok)
+
+        def delete():
+            def ok():
+                lib.delete_group(self.cid)
+                app.store.save()
+                app.root.say('تم حذف المجلد (القوائم لم تُحذف)')
+                app.root.pop()
+                app.root.refresh_pages()
+            confirm(app, 'حذف المجلد',
+                    'سيتم حذف المجلد فقط. القوائم التي بداخله والفيديوهات تبقى كما هي.', 'حذف', ok)
         sheet.show()
 
 
