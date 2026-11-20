@@ -242,10 +242,10 @@ ICONS = {
              ('line', [(8, 11), (8, 8)] + _arc(12, 8, 4, 180, 360) + [(16, 8), (16, 11)]), ('dot', 12, 15.8, 1.5)],
     'unlock': [('line', [(6, 11), (18, 11), (19.5, 12.5), (19.5, 19), (18, 20.5), (6, 20.5), (4.5, 19), (4.5, 12.5), (6, 11)]),
                ('line', [(8, 11), (8, 8)] + _arc(12, 8, 4, 180, 360) + [(16, 8), (16, 5.5)]), ('dot', 12, 15.8, 1.5)],
-    'speed': [('line', _arc(12, 14, 9, 180, 360)), ('line', [(12, 14), (17, 9)]), ('line', [(3, 14), (21, 14)])],
-    'subtitle': [('line', [(5, 4), (19, 4), (21, 6), (21, 15), (19, 17), (11.5, 17), (7, 21), (7, 17), (5, 17), (3, 15), (3, 6), (5, 4)]),
-                 ('line', [(7, 9), (11.5, 9)]), ('line', [(14, 9), (17, 9)]),
-                 ('line', [(7, 12.5), (9.5, 12.5)]), ('line', [(12, 12.5), (17, 12.5)])],
+    'speed': [('line', _arc(12, 15, 9, 190, 350, 22)), ('line', [(12, 15), (16.5, 10)]), ('dot', 12, 15, 1.6)],
+    'subtitle': [('line', [(5, 4), (19, 4), (21, 6), (21, 18), (19, 20), (5, 20), (3, 18), (3, 6), (5, 4)]),
+                 ('line', [(6.5, 10), (10, 10)]), ('line', [(13, 10), (17.5, 10)]),
+                 ('line', [(6.5, 14.5), (11, 14.5)]), ('line', [(14, 14.5), (17.5, 14.5)])],
     'audio': [('dot', 8, 18, 3), ('line', [(11, 18), (11, 5), (19, 7.5)])],
     'brightness': [('circle', 12, 12, 4)] + [('line', [(12 + 7 * math.cos(math.radians(a)), 12 + 7 * math.sin(math.radians(a))),
                                                        (12 + 10 * math.cos(math.radians(a)), 12 + 10 * math.sin(math.radians(a)))])
@@ -259,14 +259,14 @@ ICONS = {
                    ('line', [(11, 10.5), (12.5, 9.5), (12.5, 14.5)])],
     'shuffle': [('line', [(3, 7), (8, 7), (15, 17), (20, 17)]), ('line', [(3, 17), (8, 17), (15, 7), (20, 7)]),
                 ('line', [(17, 4), (20, 7), (17, 10)]), ('line', [(17, 14), (20, 17), (17, 20)])],
-    'drag': [('line', [(5, 8), (19, 8)]), ('line', [(5, 12), (19, 12)]), ('line', [(5, 16), (19, 16)])],
+    'drag': [('line', [(5, 7.5), (19, 7.5)]), ('line', [(5, 12), (19, 12)]), ('line', [(5, 16.5), (19, 16.5)])],
     'clock': [('circle', 12, 12, 9), ('line', [(12, 7), (12, 12), (16, 14)])],
     'tune': [('line', [(4, 8), (20, 8)]), ('line', [(4, 16), (20, 16)]), ('dot', 9, 8, 2.6), ('dot', 15, 16, 2.6)],
     'move_top': [('line', [(5, 5), (19, 5)]), ('line', [(12, 20), (12, 9)]), ('line', [(7, 13), (12, 8), (17, 13)])],
     'move_bottom': [('line', [(5, 19), (19, 19)]), ('line', [(12, 4), (12, 15)]), ('line', [(7, 11), (12, 16), (17, 11)])],
     'info': [('circle', 12, 12, 9), ('line', [(12, 11), (12, 17)]), ('dot', 12, 7.5, 1.3)],
-    'restore': [('line', _arc(12, 12, 8, 30, 320)), ('line', [(4, 3.5), (4, 8.5), (9, 8.5)]),
-                ('line', [(12, 8), (12, 12), (15, 14)])],
+    'restore': _mirror([('line', _arc(12, 12, 8, 40, 330)), _arrow_fill(12, 12, 8, 330, 4.2)]) +
+               [('line', [(12, 8), (12, 12), (14.8, 13.8)])],
     'up': [('line', [(6, 15), (12, 9), (18, 15)])],
     'down': [('line', [(6, 9), (12, 15), (18, 9)])],
     'step_fwd': _STEP_FWD,
@@ -274,8 +274,8 @@ ICONS = {
     'volume_mute': [('fill', [(4, 9), (8, 9), (13, 5), (13, 19), (8, 15), (4, 15)]),
                     ('line', [(16, 9.5), (21, 14.5)]), ('line', [(21, 9.5), (16, 14.5)])],
     'bolt': [('fill', [(13, 3), (6, 13), (11, 13), (10, 21), (18, 10), (13, 10)])],
-    'share': [('dot', 18, 5.5, 2.5), ('dot', 6, 12, 2.5), ('dot', 18, 18.5, 2.5),
-              ('line', [(8.2, 10.8), (15.8, 6.7)]), ('line', [(8.2, 13.2), (15.8, 17.3)])],
+    'share': [('circle', 18, 5.5, 2.7), ('circle', 6, 12, 2.7), ('circle', 18, 18.5, 2.7),
+              ('line', [(8.4, 10.7), (15.6, 6.8)]), ('line', [(8.4, 13.3), (15.6, 17.2)])],
     # a phone with a turning arrow on each side: rotate the screen
     'screen_rotate': [('line', [(9.2, 7.5), (14.8, 7.5), (14.8, 16.5), (9.2, 16.5), (9.2, 7.5)]),
                       ('line', _arc(12, 12, 9.4, 305, 385, 14)), _arrow_fill(12, 12, 9.4, 385, 3.4),
@@ -306,7 +306,7 @@ class Icon(Widget):
 
         def P(x, y):
             return ox + x * u, oy + (24 - y) * u
-        lw = max(1.0, self.stroke * u)
+        lw = max(1.2, self.stroke * 0.82 * u)
         with self.canvas:
             Color(*self.color)
             for op in ops:
@@ -1799,9 +1799,12 @@ class MenuSheet(Overlay):
     PAD_TOP = dp(18)
     PAD_BOTTOM = dp(14)
 
-    def __init__(self, root, build, **kw):
+    def __init__(self, root, build, footer=None, **kw):
         super(MenuSheet, self).__init__(root, **kw)
         self.build = build
+        self.footer_fn = footer           # optional: returns a widget pinned to the bottom (never scrolls)
+        self.footer_w = None
+        self.footer_h = 0
         self.panel = Panel()
         self.add_widget(self.panel)
         self.sv = make_scroll(size_hint=(None, None))
@@ -1822,6 +1825,16 @@ class MenuSheet(Overlay):
             total += w.height
             self.box.add_widget(w)
         self.content_h = total
+        if self.footer_w is not None:
+            self.panel.remove_widget(self.footer_w)
+            self.footer_w = None
+        self.footer_h = 0
+        if self.footer_fn is not None:
+            fw = self.footer_fn()
+            fw.size_hint = (None, None)
+            self.panel.add_widget(fw)
+            self.footer_w = fw
+            self.footer_h = fw.height + dp(6)
         self.box.height = total                 # at once: do not wait for the next layout pass
         if total <= self.sv.height:
             self.sv.scroll_y = 1                # content that fits is never left scrolled
@@ -1840,13 +1853,20 @@ class MenuSheet(Overlay):
             self.panel.pos = ((self.x + self.width) - pw, self.y)
         else:
             pw = min(W, dp(520))
-            ph = min(self.content_h + dp(6), H * 0.82)
+            ph = min(self.content_h + self.footer_h + dp(6), H * 0.82)
             self.panel.radius = [dp(26), dp(26), 0, 0]
             self.panel.pos = ((self.x + self.width / 2.0) - pw / 2.0, self.y)
         self.panel._bg.radius = self.panel.radius
         self.panel.size = (pw, ph)
-        self.sv.pos = self.panel.pos
-        self.sv.size = self.panel.size
+        fh = self.footer_h
+        self.sv.pos = (self.panel.x, self.panel.y + fh)
+        self.sv.size = (pw, ph - fh)
+        if self.footer_w is not None:
+            self.footer_w.pos = self.panel.pos
+            self.footer_w.size = (pw, fh)
+            with self.panel.canvas.after:               # a thin line above the pinned button
+                Color(1, 1, 1, 0.08)
+                Rectangle(pos=(self.panel.x, self.panel.y + fh), size=(pw, 1))
         if W <= H:
             with self.panel.canvas.after:               # the little grab handle of a bottom sheet
                 Color(1, 1, 1, 0.22)

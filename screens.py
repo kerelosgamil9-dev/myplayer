@@ -414,7 +414,7 @@ class CreateRow(Row):
         super(CreateRow, self).__init__(**kw)
         self.label = Txt(ltext=self.LABEL, font_size=sp(16), bold=True, nlines=2,
                          size_hint=(None, None))
-        self.plus = Icon(name='plus', color=list(ACCENT), size=(dp(34), dp(34)), stroke=1.9)
+        self.plus = Icon(name='plus', color=list(ACCENT), size=(dp(30), dp(30)), stroke=1.7)
         self.add_widget(self.label)
         self.add_widget(self.plus)
 
@@ -428,9 +428,9 @@ class CreateRow(Row):
         with self.canvas.before:
             Color(*ACCENT_SOFT)
             RoundedRectangle(pos=(x, y), size=(tw, th), radius=[dp(14)])
-            Color(ACCENT[0], ACCENT[1], ACCENT[2], 0.55)
-            Line(rounded_rectangle=(x + dp(0.7), y + dp(0.7), tw - dp(1.4), th - dp(1.4), dp(14)),
-                 width=dp(1.3))
+            Color(ACCENT[0], ACCENT[1], ACCENT[2], 0.32)
+            Line(rounded_rectangle=(x + dp(0.5), y + dp(0.5), tw - dp(1.0), th - dp(1.0), dp(14)),
+                 width=dp(1.0))
         self.plus.center = (x + tw / 2.0, y + th / 2.0)
         self.label.pos = (self.x + dp(16), (self.y + self.height / 2.0) - dp(20))
         self.label.size = (x - dp(16) - self.x - dp(16), dp(40))
@@ -579,15 +579,18 @@ def pick_lists(app, title, candidates, ok_label, on_done):
     def build():
         n = len(chosen)
         rows = [SheetTitle(title),
-                SheetButton('%s (%d)' % (ok_label, n) if n else 'اختر قائمة واحدة على الأقل',
-                            callback=lambda w: go(), enabled=bool(n)),
                 SheetRow('إلغاء تحديد الكل' if n == len(ids) else 'تحديد الكل', icon='select_all',
                          callback=lambda w: toggle_all())]
         for c in candidates:
             rows.append(SheetRow(c.name, icon='playlist', value=core.count_videos_label(c.count),
                                  checked=c.id in chosen, callback=lambda w, cid=c.id: toggle(cid)))
         return rows
-    sheet = MenuSheet(app.root, build)
+
+    def footer():                                # pinned at the bottom: always reachable however long the list
+        n = len(chosen)
+        return SheetButton('%s (%d)' % (ok_label, n) if n else 'اختر قائمة واحدة على الأقل',
+                           callback=lambda w: go(), enabled=bool(n))
+    sheet = MenuSheet(app.root, build, footer=footer)
 
     def toggle(cid):
         if cid in chosen:
@@ -714,15 +717,29 @@ class TabBar(Widget):
         self._hit = []
         ch = dp(38)
         cy0 = self.y + (self.height - ch) / 2.0
+        gap = dp(8)
+        avail = self.width - dp(32)
+        for tid, label in self.tabs:
+            t = self.labels[tid]
+            active = tid == self.current
+            t.bold = active
+            t.color = ACCENT if active else (0.80, 0.82, 0.87, 1)
+        pad = dp(34)
+        for fs in (15.5, 14.5, 13.5, 12.5):          # shrink until all the chips fit on the screen
+            for tid, label in self.tabs:
+                self.labels[tid].font_size = sp(fs)
+            texts = [max(dp(30), self.labels[tid].text_width()) for tid, label in self.tabs]
+            pad = (avail - gap * (len(texts) - 1) - sum(texts)) / float(len(texts))
+            if pad >= dp(26):
+                break
+        pad = min(dp(34), max(dp(12), pad))
         with self.canvas.before:
             Color(*BG)
             Rectangle(pos=self.pos, size=self.size)
             for tid, label in self.tabs:
                 t = self.labels[tid]
                 active = tid == self.current
-                t.bold = active
-                t.color = ACCENT if active else (0.80, 0.82, 0.87, 1)
-                cw = max(dp(30), t.text_width()) + dp(34)
+                cw = max(dp(30), t.text_width()) + pad
                 cx0 = x - cw
                 Color(*(ACCENT_SOFT if active else SURFACE))
                 RoundedRectangle(pos=(cx0, cy0), size=(cw, ch), radius=[ch / 2.0])
@@ -732,7 +749,7 @@ class TabBar(Widget):
                 t.size = (cw, ch)
                 t.pos = (cx0, cy0)
                 self._hit.append((cx0 - dp(4), cx0 + cw + dp(4), tid))
-                x = cx0 - dp(8)
+                x = cx0 - gap
 
     def on_touch_down(self, touch):
         if not self.collide_point(*touch.pos):
@@ -976,9 +993,6 @@ class SettingsPane(FloatLayout):
 
         def build():
             rows = [SheetTitle('استعادة القوائم المحذوفة')]
-            n = len(chosen)
-            rows.append(SheetButton('استعادة المحدد (%d)' % n if n else 'اختر قوائم للاستعادة',
-                                    callback=lambda w: go(), enabled=bool(n)))
             all_on = len(chosen) == len(rows_data)
             rows.append(SheetRow('إلغاء تحديد الكل' if all_on else 'تحديد الكل', icon='select_all',
                                  callback=lambda w: toggle_all()))
@@ -986,7 +1000,12 @@ class SettingsPane(FloatLayout):
                 rows.append(SheetRow(name, icon='playlist', value=core.count_videos_label(cnt),
                                      checked=cid in chosen, callback=lambda w, cid=cid: toggle(cid)))
             return rows
-        sheet = MenuSheet(app.root, build)
+
+        def footer():
+            n = len(chosen)
+            return SheetButton('استعادة المحدد (%d)' % n if n else 'اختر قوائم للاستعادة',
+                               callback=lambda w: go(), enabled=bool(n))
+        sheet = MenuSheet(app.root, build, footer=footer)
 
         def toggle(cid):
             if cid in chosen:
