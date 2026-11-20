@@ -49,10 +49,26 @@ AR_FONT = 'ProArabic'
 LATIN_FONT = 'Roboto'
 
 
+def _find_font(*names):
+    """First font file that exists (in assets/fonts, or next to this file when the app is flat)."""
+    for n in names:
+        for d in (os.path.join(HERE, 'assets', 'fonts'), HERE):
+            p = os.path.join(d, n)
+            if os.path.exists(p):
+                return p
+    return None
+
+
 def register_fonts():
-    reg = os.path.join(HERE, 'DejaVuSans.ttf')
-    bold = os.path.join(HERE, 'DejaVuSans-Bold.ttf')
-    LabelBase.register(name=AR_FONT, fn_regular=reg, fn_bold=bold if os.path.exists(bold) else reg)
+    """IBM Plex Sans Arabic (clean, modern; Arabic + Latin in one family); DejaVu if it is missing."""
+    global LATIN_FONT
+    reg = _find_font('IBMPlexSansArabic-Regular.ttf', 'DejaVuSans.ttf')
+    bold = _find_font('IBMPlexSansArabic-SemiBold.ttf', 'DejaVuSans-Bold.ttf') or reg
+    if reg is None:
+        return
+    LabelBase.register(name=AR_FONT, fn_regular=reg, fn_bold=bold)
+    if 'IBMPlex' in os.path.basename(reg):
+        LATIN_FONT = AR_FONT
 
 
 def font_for(text):
@@ -268,6 +284,8 @@ ICONS = {
     'restore': _mirror([('line', _arc(12, 12, 8, 40, 330)), _arrow_fill(12, 12, 8, 330, 4.2)]) +
                [('line', [(12, 8), (12, 12), (14.8, 13.8)])],
     'up': [('line', [(6, 15), (12, 9), (18, 15)])],
+    'arrow_up': [('line', [(12, 19), (12, 5)]), ('line', [(6, 11), (12, 5), (18, 11)])],
+    'arrow_down': [('line', [(12, 5), (12, 19)]), ('line', [(6, 13), (12, 19), (18, 13)])],
     'down': [('line', [(6, 9), (12, 15), (18, 9)])],
     'step_fwd': _STEP_FWD,
     'step_back': _mirror(_STEP_FWD),
@@ -477,7 +495,7 @@ class PillSwitch(Tap):
 
     def __init__(self, value=False, on_change=None, **kw):
         kw.setdefault('size_hint', (None, None))
-        kw.setdefault('size', (dp(46), dp(28)))
+        kw.setdefault('size', (dp(44), dp(26)))
         super(PillSwitch, self).__init__(callback=self._toggle, **kw)
         self.on_change = on_change
         self.value = value
@@ -496,14 +514,25 @@ class PillSwitch(Tap):
         self.canvas.clear()
         h = self.height
         with self.canvas:
-            Color(*(ACCENT if self.value else (0.27, 0.28, 0.32, 1)))
-            RoundedRectangle(pos=self.pos, size=self.size, radius=[h / 2.0])
-            r = h * 0.37
-            cx = (self.x + self.width) - h / 2.0 if self.value else self.x + h / 2.0
+            if self.value:
+                Color(*ACCENT)
+                RoundedRectangle(pos=self.pos, size=self.size, radius=[h / 2.0])
+            else:                                                   # quiet track with a hairline edge
+                Color(1, 1, 1, 0.16)
+                RoundedRectangle(pos=self.pos, size=self.size, radius=[h / 2.0])
+                Color(0.105, 0.11, 0.135, 1)
+                RoundedRectangle(pos=(self.x + dp(1.3), self.y + dp(1.3)),
+                                 size=(self.width - dp(2.6), self.height - dp(2.6)), radius=[h / 2.0])
+            r = h * (0.36 if self.value else 0.28)
+            pad = h / 2.0
+            cx = (self.x + self.width) - pad if self.value else self.x + pad
             cy = self.y + self.height / 2.0
-            Color(0, 0, 0, 0.22)                                   # soft shadow under the knob
-            Ellipse(pos=(cx - r, cy - r - dp(1)), size=(2 * r, 2 * r))
-            Color(1, 1, 1, 1) if self.value else Color(0.82, 0.83, 0.87, 1)
+            if self.value:
+                Color(0, 0, 0, 0.18)                                # soft shadow under the knob
+                Ellipse(pos=(cx - r, cy - r - dp(1)), size=(2 * r, 2 * r))
+                Color(1, 1, 1, 1)
+            else:
+                Color(0.66, 0.68, 0.73, 1)
             Ellipse(pos=(cx - r, cy - r), size=(2 * r, 2 * r))
 
 
@@ -1672,6 +1701,21 @@ class SheetRow(Tap):
         self.bind(pos=self._lay, size=self._lay)
         self._lay()
 
+    def set_checked(self, flag):
+        """Tick / untick in place (no rebuild of the whole sheet: that is what made long lists lag)."""
+        flag = bool(flag)
+        if flag == (self.chk is not None):
+            return
+        if flag:
+            self.chk = Icon(name='check', color=list(ACCENT), size=(dp(24), dp(24)), stroke=2.0)
+            self.add_widget(self.chk)
+        else:
+            self.remove_widget(self.chk)
+            self.chk = None
+        self.lbl.color = DANGER if self.danger else (ACCENT if flag else TEXT)
+        self.lbl.bold = flag
+        self._lay()
+
     def _lay(self, *a):
         pad = dp(18)
         cy = self.y + self.height / 2.0
@@ -1825,6 +1869,14 @@ class MenuSheet(Overlay):
             total += w.height
             self.box.add_widget(w)
         self.content_h = total
+        self._make_footer()
+        self.box.height = total                 # at once: do not wait for the next layout pass
+        if total <= self.sv.height:
+            self.sv.scroll_y = 1                # content that fits is never left scrolled
+        self._ready = True
+        self.place()
+
+    def _make_footer(self):
         if self.footer_w is not None:
             self.panel.remove_widget(self.footer_w)
             self.footer_w = None
@@ -1835,10 +1887,10 @@ class MenuSheet(Overlay):
             self.panel.add_widget(fw)
             self.footer_w = fw
             self.footer_h = fw.height + dp(6)
-        self.box.height = total                 # at once: do not wait for the next layout pass
-        if total <= self.sv.height:
-            self.sv.scroll_y = 1                # content that fits is never left scrolled
-        self._ready = True
+
+    def refresh_footer(self):
+        """Replace only the pinned button (cheap): used after ticking a row."""
+        self._make_footer()
         self.place()
 
     def place(self):
@@ -1920,8 +1972,12 @@ class Dialog(Overlay):
         pad = dp(22)
         msg_lines = 0
         if self.msg.ltext:
-            msg_lines = min(6, max(1, int(self.msg.ltext.count('\n') + 1 + len(self.msg.ltext) / 34.0)))
-        mh = msg_lines * sp(15) * 1.5 if self.msg.ltext else 0
+            tw = pw - 2 * pad
+            font = font_for(self.msg.ltext)
+            for part in self.msg.ltext.split('\n'):
+                msg_lines += len(textfix.wrap_text(part, tw, lambda t: measure(t, font, sp(15), False), 6) or [''])
+            msg_lines = min(6, max(1, msg_lines))
+        mh = msg_lines * sp(15) * 1.62 if self.msg.ltext else 0
         eh = (self.extra.height + dp(10)) if self.extra is not None else 0
         ph = pad + dp(32) + dp(10) + mh + eh + dp(20) + dp(48) + dp(18)
         px = (self.x + self.width / 2.0) - pw / 2.0

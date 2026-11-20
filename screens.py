@@ -408,32 +408,34 @@ class GroupRow(CollRow):
 class CreateRow(Row):
     kind = 'create'
 
-    LABEL = 'إنشاء قائمة التشغيل الخاصة بك'
+    LABEL = 'إنشاء قائمة تشغيل جديدة'
 
     def __init__(self, **kw):
         super(CreateRow, self).__init__(**kw)
-        self.label = Txt(ltext=self.LABEL, font_size=sp(16), bold=True, nlines=2,
-                         size_hint=(None, None))
-        self.plus = Icon(name='plus', color=list(ACCENT), size=(dp(30), dp(30)), stroke=1.7)
+        self.label = Txt(ltext=self.LABEL, font_size=sp(15.5), bold=True, nlines=2, size_hint=(None, None))
+        self.plus = Icon(name='plus', color=list(ACCENT), size=(dp(26), dp(26)), stroke=1.8)
         self.add_widget(self.label)
         self.add_widget(self.plus)
 
     def relayout(self):
         if self.unchanged():
             return
-        tw, th = dp(142), dp(80)
+        tw, th = dp(128), dp(72)                      # same footprint as a cover: rows line up
         x = (self.x + self.width) - dp(16) - tw
-        y = (self.y + self.height / 2.0) - th / 2.0 - dp(3)
+        y = (self.y + self.height / 2.0) - th / 2.0
         self.canvas.before.clear()
         with self.canvas.before:
-            Color(*ACCENT_SOFT)
-            RoundedRectangle(pos=(x, y), size=(tw, th), radius=[dp(14)])
-            Color(ACCENT[0], ACCENT[1], ACCENT[2], 0.32)
-            Line(rounded_rectangle=(x + dp(0.5), y + dp(0.5), tw - dp(1.0), th - dp(1.0), dp(14)),
-                 width=dp(1.0))
+            Color(ACCENT[0], ACCENT[1], ACCENT[2], 0.07)
+            RoundedRectangle(pos=(x, y), size=(tw, th), radius=[dp(12)])
+            Color(ACCENT[0], ACCENT[1], ACCENT[2], 0.30)
+            Line(rounded_rectangle=(x + dp(0.5), y + dp(0.5), tw - dp(1.0), th - dp(1.0), dp(12)),
+                 width=dp(1.0), dash_length=dp(5), dash_offset=dp(4))
+            d = dp(38)                                # the plus sits in a soft disc
+            Color(ACCENT[0], ACCENT[1], ACCENT[2], 0.16)
+            Ellipse(pos=(x + tw / 2.0 - d / 2.0, y + th / 2.0 - d / 2.0), size=(d, d))
         self.plus.center = (x + tw / 2.0, y + th / 2.0)
-        self.label.pos = (self.x + dp(16), (self.y + self.height / 2.0) - dp(20))
-        self.label.size = (x - dp(16) - self.x - dp(16), dp(40))
+        self.label.pos = (self.x + dp(16), (self.y + self.height / 2.0) - dp(30))
+        self.label.size = (x - dp(14) - self.x - dp(16), dp(60))
 
 
 class GCreateRow(CreateRow):
@@ -569,21 +571,30 @@ def choose_playlist(app, keys, after=None):
 
 
 def pick_lists(app, title, candidates, ok_label, on_done):
-    """Sheet with lists to tick (at least one); on_done(list_of_ids) when confirmed."""
+    """Sheet with lists to tick (at least one); on_done(list_of_ids) when confirmed.
+
+    Ticking only touches the one row and the pinned button: rebuilding every row each time was slow."""
     if not candidates:
         app.root.say('لا توجد قوائم تشغيل لإضافتها')
         return
     chosen = []
     ids = [c.id for c in candidates]
+    rows_by_id = {}
+    all_row = []
+
+    def all_label():
+        return 'إلغاء تحديد الكل' if len(chosen) == len(ids) else 'تحديد الكل'
 
     def build():
-        n = len(chosen)
-        rows = [SheetTitle(title),
-                SheetRow('إلغاء تحديد الكل' if n == len(ids) else 'تحديد الكل', icon='select_all',
-                         callback=lambda w: toggle_all())]
+        rows_by_id.clear()
+        del all_row[:]
+        all_row.append(SheetRow(all_label(), icon='select_all', callback=lambda w: toggle_all()))
+        rows = [SheetTitle(title), all_row[0]]
         for c in candidates:
-            rows.append(SheetRow(c.name, icon='playlist', value=core.count_videos_label(c.count),
-                                 checked=c.id in chosen, callback=lambda w, cid=c.id: toggle(cid)))
+            r = SheetRow(c.name, icon='playlist', value=core.count_videos_label(c.count),
+                         checked=c.id in chosen, callback=lambda w, cid=c.id: toggle(cid))
+            rows_by_id[c.id] = r
+            rows.append(r)
         return rows
 
     def footer():                                # pinned at the bottom: always reachable however long the list
@@ -592,19 +603,26 @@ def pick_lists(app, title, candidates, ok_label, on_done):
                            callback=lambda w: go(), enabled=bool(n))
     sheet = MenuSheet(app.root, build, footer=footer)
 
+    def sync():
+        all_row[0].lbl.ltext = all_label()
+        sheet.refresh_footer()
+
     def toggle(cid):
         if cid in chosen:
             chosen.remove(cid)
         else:
             chosen.append(cid)
-        sheet.rebuild()
+        rows_by_id[cid].set_checked(cid in chosen)
+        sync()
 
     def toggle_all():
         if len(chosen) == len(ids):
             del chosen[:]
         else:
             chosen[:] = list(ids)
-        sheet.rebuild()
+        for cid, r in rows_by_id.items():
+            r.set_checked(cid in chosen)
+        sync()
 
     def go():
         if not chosen:
@@ -645,8 +663,8 @@ def sort_sheet(app, title, modes, get_state, set_state, extra=None):
             rows.append(SheetRow(core.SORT_LABELS.get(m, m), checked=(m == mode),
                                  callback=lambda w, m=m: pick(m)))
         rows.append(SheetLabel('الاتجاه'))
-        rows.append(SheetRow('تصاعدي', icon='up', checked=asc, callback=lambda w: setd(True)))
-        rows.append(SheetRow('تنازلي', icon='down', checked=not asc, callback=lambda w: setd(False)))
+        rows.append(SheetRow('تصاعدي', icon='arrow_up', checked=asc, callback=lambda w: setd(True)))
+        rows.append(SheetRow('تنازلي', icon='arrow_down', checked=not asc, callback=lambda w: setd(False)))
         return rows
     sheet = MenuSheet(app.root, build)
 
@@ -818,7 +836,7 @@ class SwitchRow(Tap):
         kw.setdefault('size_hint', (1, None))
         kw.setdefault('height', dp(62))
         super(SwitchRow, self).__init__(callback=lambda w: self.sw._toggle(), **kw)
-        self.lbl = Txt(ltext=label, font_size=sp(16), size_hint=(None, None), nlines=2)
+        self.lbl = Txt(ltext=label, font_size=sp(15.5), size_hint=(None, None), nlines=2)
         self.sw = PillSwitch(value=value, on_change=on_change)
         self.icon = Icon(name=icon, size=(dp(22), dp(22))) if icon else None
         for w in (self.icon, self.lbl, self.sw):
@@ -990,15 +1008,22 @@ class SettingsPane(FloatLayout):
             app.root.say('لا توجد قوائم محذوفة')
             return
         chosen = set()
+        rows_by_id = {}
+        all_row = []
+
+        def all_label():
+            return 'إلغاء تحديد الكل' if len(chosen) == len(rows_data) else 'تحديد الكل'
 
         def build():
-            rows = [SheetTitle('استعادة القوائم المحذوفة')]
-            all_on = len(chosen) == len(rows_data)
-            rows.append(SheetRow('إلغاء تحديد الكل' if all_on else 'تحديد الكل', icon='select_all',
-                                 callback=lambda w: toggle_all()))
+            rows_by_id.clear()
+            del all_row[:]
+            all_row.append(SheetRow(all_label(), icon='select_all', callback=lambda w: toggle_all()))
+            rows = [SheetTitle('استعادة القوائم المحذوفة'), all_row[0]]
             for cid, name, cnt in rows_data:
-                rows.append(SheetRow(name, icon='playlist', value=core.count_videos_label(cnt),
-                                     checked=cid in chosen, callback=lambda w, cid=cid: toggle(cid)))
+                r = SheetRow(name, icon='playlist', value=core.count_videos_label(cnt),
+                             checked=cid in chosen, callback=lambda w, cid=cid: toggle(cid))
+                rows_by_id[cid] = r
+                rows.append(r)
             return rows
 
         def footer():
@@ -1007,19 +1032,26 @@ class SettingsPane(FloatLayout):
                                callback=lambda w: go(), enabled=bool(n))
         sheet = MenuSheet(app.root, build, footer=footer)
 
+        def sync():
+            all_row[0].lbl.ltext = all_label()
+            sheet.refresh_footer()
+
         def toggle(cid):
             if cid in chosen:
                 chosen.discard(cid)
             else:
                 chosen.add(cid)
-            sheet.rebuild()
+            rows_by_id[cid].set_checked(cid in chosen)
+            sync()
 
         def toggle_all():
             if len(chosen) == len(rows_data):
                 chosen.clear()
             else:
                 chosen.update(r[0] for r in rows_data)
-            sheet.rebuild()
+            for cid, r in rows_by_id.items():
+                r.set_checked(cid in chosen)
+            sync()
 
         def go():
             sheet.dismiss()
