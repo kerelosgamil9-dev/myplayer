@@ -37,7 +37,7 @@ _CRUMB = {'path': None}
 _HW_STARTUP = ('hw: open', 'hw: oes', 'hw: surface', 'hw: prepared', 'hw: shader', 'hw: started')
 
 
-def init_crumbs(app):
+def _init_crumbs_inner(app):
     """Breadcrumb file: survives native crashes, shown on the next start."""
     try:
         p = os.path.join(data_dir(app), 'last_run.txt')
@@ -73,6 +73,65 @@ def init_crumbs(app):
     except Exception:
         pass
     return ''
+
+
+def init_crumbs(app):
+    """Breadcrumbs of the previous run, plus the Java stack trace when that run died of an uncaught Java
+    exception (written by the handler installed with install_crash_logger)."""
+    res = _init_crumbs_inner(app)
+    try:
+        p = _data_file('java_crash.txt')
+        if p and os.path.exists(p):
+            with open(p, encoding='utf8', errors='replace') as f:
+                jc = f.read().strip()
+            os.remove(p)
+            if jc:
+                lines = [ln[:150] for ln in jc.split('\n') if ln.strip()][:28]
+                res = (res or 'PREVIOUS RUN CRASHED') + '\n\n>> java crash:\n' + '\n'.join(lines)
+    except Exception:
+        pass
+    return res
+
+
+_JCRASH = {'handler': None}
+
+
+def install_crash_logger():
+    """Remember the stack trace of an uncaught Java exception (any thread) in java_crash.txt, then let
+    Android handle the crash as usual."""
+    if not ANDROID:
+        return
+    try:
+        from jnius import PythonJavaClass, java_method
+        Thread = autoclass('java.lang.Thread')
+        Log = autoclass('android.util.Log')
+        prev = Thread.getDefaultUncaughtExceptionHandler()
+        path = _data_file('java_crash.txt')
+        if not path:
+            return
+
+        class _Handler(PythonJavaClass):
+            __javainterfaces__ = ['java/lang/Thread$UncaughtExceptionHandler']
+            __javacontext__ = 'app'
+
+            @java_method('(Ljava/lang/Thread;Ljava/lang/Throwable;)V')
+            def uncaughtException(self, thread, ex):
+                try:
+                    txt = 'thread: %s\n%s' % (thread.getName(), Log.getStackTraceString(ex))
+                    with open(path, 'w', encoding='utf8') as f:
+                        f.write(txt)
+                except Exception:
+                    pass
+                try:
+                    if prev is not None:
+                        prev.uncaughtException(thread, ex)
+                except Exception:
+                    pass
+
+        _JCRASH['handler'] = _Handler()          # kept alive: Java only holds a weak handle
+        Thread.setDefaultUncaughtExceptionHandler(_JCRASH['handler'])
+    except Exception:
+        log(traceback.format_exc())
 
 
 def exit_info():

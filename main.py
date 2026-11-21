@@ -105,6 +105,7 @@ class ProPlayerApp(App):
         self.loaded = False
         self.permitted = False
         self.prev_crash = bridge.init_crumbs(self)
+        bridge.install_crash_logger()
         self.root = Root(self)
         self.home = HomePage(self)
         self.root.push(self.home)
