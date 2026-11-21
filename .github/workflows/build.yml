@@ -47,6 +47,18 @@ jobs:
           API=$(grep -E '^android.api' buildozer.spec | head -1)
           echo "::notice title=spec::$API"
 
+      - name: Point the cached dist at the target API from buildozer.spec
+        run: |
+          API=$(grep -E '^android.api' buildozer.spec | head -1 | sed -E 's/[^0-9]*([0-9]+).*/\1/')
+          echo "wanted API: $API"
+          for f in .buildozer/android/platform/build-*/dists/*/project.properties; do
+            [ -f "$f" ] || continue
+            echo "before: $(grep -E '^target=' "$f")"
+            sed -i -E "s/^target=android-[0-9]+/target=android-$API/" "$f"
+            echo "after:  $(grep -E '^target=' "$f")  ($f)"
+            echo "::notice title=dist target::$(grep -E '^target=' "$f")"
+          done
+
       - name: Build debug APK
         run: buildozer -v android debug
 
