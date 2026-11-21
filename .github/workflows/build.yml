@@ -34,8 +34,8 @@ jobs:
           path: |
             .buildozer
             ~/.buildozer
-          key: buildozer-v2-${{ hashFiles('buildozer.spec') }}
-          restore-keys: buildozer-v2-
+          key: buildozer35-${{ hashFiles('buildozer.spec') }}
+          restore-keys: buildozer35-
 
       - name: Install buildozer
         run: |
@@ -43,18 +43,10 @@ jobs:
           pip install buildozer "cython<3" virtualenv setuptools
 
       - name: Build debug APK
-        run: buildozer -v android debug 2>&1 | tee build.log
+        run: buildozer -v android debug
 
       - name: Upload APK
-        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: ProPlayer-apk
           path: bin/*.apk
-
-      - name: Upload log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-log
-          path: build.log
