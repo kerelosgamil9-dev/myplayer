@@ -51,6 +51,7 @@ def init_crumbs(app):
         if prev and not prev.endswith(('clean-exit', 'paused', 'resumed')):
             lines = prev.strip().split('\n')
             last = lines[-1]
+            why = exit_info()
             if last.startswith(_HW_STARTUP):
                 # the hardware decoder died while starting THIS video: that video (only) will
                 # use software playback from now on
@@ -60,7 +61,8 @@ def init_crumbs(app):
                         vid = ln[len('hw: open '):]
                         break
                 hw_mark_bad(vid, 'crash at: ' + last)
-                return prev[-600:] + '\n\n>> hardware playback crashed on this video; it will use software playback'
+                return (prev[-600:] + '\n\n>> hardware playback crashed on this video; it will use software playback'
+                        + why)
             if last.startswith('hw:'):
                 return ''           # died while a video was already playing fine: not the decoder's fault
             if last.startswith(('engine: open', 'player: load', 'engine: get_frame')):
@@ -71,6 +73,38 @@ def init_crumbs(app):
     except Exception:
         pass
     return ''
+
+
+def exit_info():
+    """Why the previous process died, as Android recorded it (API 30+): the exit reason and, for a native
+    crash, the readable strings of the tombstone (library and function names of the backtrace)."""
+    if not ANDROID or sdk_int() < 30:
+        return ''
+    try:
+        import re
+        Ctx = autoclass('android.content.Context')
+        am = _activity().getSystemService(Ctx.ACTIVITY_SERVICE)
+        lst = am.getHistoricalProcessExitReasons(None, 0, 1)
+        if lst is None or int(lst.size()) == 0:
+            return ''
+        info = lst.get(0)
+        out = ['', '>> android exit record: reason=%s status=%s' % (info.getReason(), info.getStatus()),
+               'desc: %s' % info.getDescription()]
+        stream = info.getTraceInputStream()
+        if stream is not None:
+            Scanner = autoclass('java.util.Scanner')
+            sc = Scanner(stream, 'ISO-8859-1')
+            sc.useDelimiter('\\A')
+            txt = str(sc.next()) if sc.hasNext() else ''
+            seen = []
+            for m in re.findall(r'[\x20-\x7e]{6,}', txt):
+                if m not in seen and re.search(r'/|::|\.so|SIG|abort|Abort|Fatal|fault|signal', m):
+                    seen.append(m)
+            out.append('trace (%d bytes):' % len(txt))
+            out.extend(x[:110] for x in seen[:45])
+        return '\n'.join(out)
+    except Exception:
+        return '\n>> exit record unavailable: %s' % traceback.format_exc().strip().split('\n')[-1]
 
 
 def _level_path():

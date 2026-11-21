@@ -163,9 +163,13 @@ class HWEngine(object):
             bridge.crumb('hw: open %s' % path)
             self._build_surface()
             MP = autoclass('android.media.MediaPlayer')
+            bridge.crumb('hw: surface - creating player')
             mp = MP()
+            bridge.crumb('hw: surface - setDataSource')
             mp.setDataSource(path)
+            bridge.crumb('hw: surface - setSurface')
             mp.setSurface(self.surface)
+            bridge.crumb('hw: surface - prepare')
             mp.prepare()
             self.mp = mp
             bridge.crumb('hw: prepared')
