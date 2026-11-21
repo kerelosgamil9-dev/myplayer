@@ -34,8 +34,8 @@ jobs:
           path: |
             .buildozer
             ~/.buildozer
-          key: buildozer35-${{ hashFiles('buildozer.spec') }}
-          restore-keys: buildozer35-
+          key: buildozer-${{ hashFiles('buildozer.spec') }}
+          restore-keys: buildozer-
 
       - name: Install buildozer
         run: |
