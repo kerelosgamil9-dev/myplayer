@@ -2380,7 +2380,7 @@ class StepButton(Tap):
         kw.setdefault('size_hint', (None, None))
         kw.setdefault('size', (dp(52), dp(52)))
         super(StepButton, self).__init__(callback=callback, **kw)
-        self.icon = Icon(name='step_fwd' if direction == 'fwd' else 'step_back', size=(dp(36), dp(36)),
+        self.icon = Icon(name='step_fwd' if direction == 'fwd' else 'step_back', size=(dp(46), dp(46)),
                          stroke=1.7)
         self.num = Txt(ltext=str(int(value)), halign='center', align_mode='center', bold=True,
                        font_size=sp(10), size_hint=(None, None))
@@ -2396,7 +2396,7 @@ class StepButton(Tap):
         cx, cy = self.x + self.width / 2.0, self.y + self.height / 2.0
         self.icon.center = (cx, cy)
         self.num.size = (dp(24), dp(14))
-        self.num.center = (cx, cy - 1.2 * self.icon.width / 24.0)
+        self.num.center = (cx, cy + dp(0.2))         # the ring of the arrow is centred on the icon box
 
     def _set_pressed(self, v):
         self.pressed = v

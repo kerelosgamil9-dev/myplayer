@@ -440,7 +440,7 @@ class PlayerPage(Page):
                            outline_color=(0, 0, 0, 1), bold=True)
         self.add_widget(self.sub_lbl)
         self.fb = Badge()                                   # short messages (+10 s from a button)
-        self.speed_tag = Badge(font=sp(14))                 # permanent speed other than 1x
+        self.speed_tag = Badge(font=sp(14))                 # shown for two seconds when the speed changes
         self.hold_pill = Badge(pulse=True)                  # the 2x while the finger is held down
         self.bubble = Badge(font=sp(14))                    # time above the seek bar knob
         self.step_fb = {'back': SideFeedback('back'), 'fwd': SideFeedback('fwd')}
@@ -740,10 +740,11 @@ class PlayerPage(Page):
             self.app.root.say('السرعة ' + core.fmt_speed(self.speed))
 
     def _sync_speed_tag(self):
+        """Tell the speed for two seconds after it was changed, then let the picture be."""
         if abs(self.speed - 1.0) > 1e-6 and not self.hold_active:
             self.speed_tag.show(core.fmt_speed(self.speed),
                                 ((self.x + self.width / 2.0), (self.y + self.height) - dp(86)),
-                                icon='speed', h=dp(34))
+                                icon='speed', h=dp(34), duration=2.0)
         else:
             self.speed_tag.hide()
 
@@ -1040,7 +1041,6 @@ class PlayerPage(Page):
             self.hold_active = False
             self.hold_pill.hide()
             self.engine.set_speed(self.speed)
-            self._sync_speed_tag()
 
     def _hold_watchdog(self, dt):
         """If the finger is gone but the 2x is still running (lost touch-up), stop it."""
@@ -1061,11 +1061,13 @@ class PlayerPage(Page):
         if not g or g['mode'] is not None or self.locked:
             return
         g['mode'] = 'hold'
+        if self.engine.paused:
+            return                      # nothing to speed up: the picture and sound stay where they are
         self.hold_active = True
         hs = float(self.store.setting('hold_speed') or 2.0)
         self.speed_tag.hide()
         self.hold_pill.show(core.fmt_speed(hs),
-                            ((self.x + self.width / 2.0), (self.y + self.height) - dp(86)), icon='fwd',
+                            ((self.x + self.width / 2.0), (self.y + self.height) - dp(86)), icon='ff',
                             h=dp(40))
         if self.store.setting('vibrate'):
             bridge.vibrate(15)
@@ -1132,7 +1134,6 @@ class PlayerPage(Page):
                 self.hold_pill.hide()
                 if abs(float(self.store.setting('hold_speed') or 2.0) - self.speed) > 1e-6:
                     self.engine.set_speed(self.speed)
-                self._sync_speed_tag()
             elif mode == 'seek':
                 if 'target' in g:
                     self.engine.seek(g['target'])

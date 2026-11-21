@@ -600,6 +600,10 @@ class HWEngine(object):
     def _apply_speed(self):
         if self.mp is None:
             return
+        if self.paused:
+            # setPlaybackParams() with a speed above 0 STARTS a paused MediaPlayer (sound and picture run
+            # for a moment): the speed is only remembered and applied when playback resumes
+            return
         try:
             from jnius import autoclass
             PP = autoclass('android.media.PlaybackParams')
@@ -623,6 +627,7 @@ class HWEngine(object):
             else:
                 if self.eof:
                     self.eof = False
+                self._apply_speed()
                 self.mp.start()
         except Exception:
             traceback.print_exc()

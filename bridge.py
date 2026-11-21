@@ -1115,6 +1115,8 @@ class NativeAudio(object):
     def _apply_speed(self):
         if self.mp is None:
             return
+        if self.paused:
+            return                      # setPlaybackParams() would START a paused player: apply on resume
         try:
             PP = autoclass('android.media.PlaybackParams')
             pp = PP()
@@ -1147,6 +1149,7 @@ class NativeAudio(object):
             if self.paused:
                 self.mp.pause()
             else:
+                self._apply_speed()
                 self.mp.start()
         except Exception:
             pass
