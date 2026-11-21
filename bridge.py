@@ -849,55 +849,58 @@ def set_orientation(mode):
         _set_orientation_ui(mode)
 
 
-_INSETS = {'listener': None, 'immersive': False}
-
-
-def _make_insets_listener():
-    """View.OnApplyWindowInsetsListener that pads the activity's content view by the system bars (and
-    keyboard), because Android 15+ draws every app edge to edge, under the status and navigation bars."""
-    from jnius import PythonJavaClass, java_method
-
-    class _Insets(PythonJavaClass):
-        __javainterfaces__ = ['android/view/View$OnApplyWindowInsetsListener']
-        __javacontext__ = 'app'
-
-        @java_method('(Landroid/view/View;Landroid/view/WindowInsets;)Landroid/view/WindowInsets;')
-        def onApplyWindowInsets(self, v, insets):
-            try:
-                if _INSETS['immersive']:                 # full-screen video: no padding at all
-                    v.setPadding(0, 0, 0, 0)
-                    return insets
-                T = autoclass('android.view.WindowInsets$Type')
-                bars = insets.getInsets(T.systemBars() | T.displayCutout())
-                ime = insets.getInsets(T.ime())
-                v.setPadding(int(bars.left), int(bars.top), int(bars.right),
-                             int(max(bars.bottom, ime.bottom)))
-            except Exception:
-                log(traceback.format_exc())
-            return insets
-    return _Insets()
+_INSETS = {'on': False, 'immersive': False, 'pad': None, 'view': None, 'decor': None,
+           'mask': 0, 'ime': 0, 'ev': None}
 
 
 @run_on_ui_thread
 def _setup_insets_ui(bg_color):
+    """One-off: dark window background behind the bars and light icons on them."""
     try:
-        act = _activity()
-        win = act.getWindow()
+        win = _activity().getWindow()
         try:
             win.getDecorView().setBackgroundColor(int(bg_color))
         except Exception:
             log(traceback.format_exc())
-        try:                                         # light icons on our dark bars
+        try:
             ctl = win.getInsetsController()
             WIC = autoclass('android.view.WindowInsetsController')
             ctl.setSystemBarsAppearance(0, WIC.APPEARANCE_LIGHT_STATUS_BARS |
                                         WIC.APPEARANCE_LIGHT_NAVIGATION_BARS)
         except Exception:
             log(traceback.format_exc())
-        content = act.findViewById(16908290)         # android.R.id.content
-        _INSETS['listener'] = _make_insets_listener()     # kept alive: Java only holds a weak handle
-        content.setOnApplyWindowInsetsListener(_INSETS['listener'])
-        content.requestApplyInsets()
+    except Exception:
+        log(traceback.format_exc())
+
+
+@run_on_ui_thread
+def _set_padding_ui(left, top, right, bottom):
+    try:
+        _INSETS['view'].setPadding(int(left), int(top), int(right), int(bottom))
+    except Exception:
+        log(traceback.format_exc())
+
+
+def refresh_insets():
+    """Pad the activity's content view by the system bars (and keyboard).  Android 15+ draws apps that
+    target API 35 edge to edge, under the bars.  The insets are READ here, on the Python thread, and only
+    the padding itself is set on the UI thread.  (An OnApplyWindowInsetsListener written in Python ran on
+    the UI thread, and when it returned null the system crashed the whole app with a NullPointerException.)"""
+    if not _INSETS['on']:
+        return
+    try:
+        if _INSETS['immersive']:                     # full-screen video: no padding at all
+            pad = (0, 0, 0, 0)
+        else:
+            wi = _INSETS['decor'].getRootWindowInsets()
+            if wi is None:
+                return
+            bars = wi.getInsets(_INSETS['mask'])
+            ime = wi.getInsets(_INSETS['ime'])
+            pad = (int(bars.left), int(bars.top), int(bars.right), int(max(bars.bottom, ime.bottom)))
+        if pad != _INSETS['pad']:
+            _INSETS['pad'] = pad
+            _set_padding_ui(*pad)
     except Exception:
         log(traceback.format_exc())
 
@@ -916,11 +919,26 @@ def setup_window_insets(bg_color=0xFF000000):
     """Call once at start-up.  Android only forces edge-to-edge drawing for apps that TARGET API 35+ and run
     on Android 15+; for an app built for an older target the system already keeps content inside the
     bars, so padding it again would draw black frames around everything."""
-    if ANDROID and sdk_int() >= 35 and target_sdk() >= 35:
-        c = int(bg_color) & 0xFFFFFFFF
-        if c > 0x7FFFFFFF:                           # Java ints are signed
-            c -= 0x100000000
-        _setup_insets_ui(c)
+    if not (ANDROID and sdk_int() >= 35 and target_sdk() >= 35):
+        return
+    c = int(bg_color) & 0xFFFFFFFF
+    if c > 0x7FFFFFFF:                               # Java ints are signed
+        c -= 0x100000000
+    try:
+        T = autoclass('android.view.WindowInsets$Type')      # every class is resolved on this thread
+        act = _activity()
+        _INSETS['mask'] = int(T.systemBars() | T.displayCutout())
+        _INSETS['ime'] = int(T.ime())
+        _INSETS['view'] = act.findViewById(16908290)         # android.R.id.content
+        _INSETS['decor'] = act.getWindow().getDecorView()
+        _INSETS['on'] = True
+    except Exception:
+        log(traceback.format_exc())
+        return
+    _setup_insets_ui(c)
+    if _INSETS['ev'] is None:
+        _INSETS['ev'] = Clock.schedule_interval(lambda dt: refresh_insets(), 0.25)
+    refresh_insets()
 
 
 @run_on_ui_thread
@@ -928,12 +946,6 @@ def _immersive_ui(on):
     try:
         act = _activity()
         win = act.getWindow()
-        _INSETS['immersive'] = bool(on)
-        if _INSETS['listener'] is not None:          # re-pad (or un-pad) right away
-            try:
-                act.findViewById(16908290).requestApplyInsets()
-            except Exception:
-                log(traceback.format_exc())
         if sdk_int() >= 30:
             try:
                 T = autoclass('android.view.WindowInsets$Type')
@@ -962,6 +974,8 @@ def _immersive_ui(on):
 
 def set_immersive(on):
     if ANDROID:
+        _INSETS['immersive'] = bool(on)
+        refresh_insets()
         _immersive_ui(bool(on))
 
 
