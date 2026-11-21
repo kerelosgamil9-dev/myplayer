@@ -104,6 +104,24 @@ def measure(text, font, size, bold=False):
     return w
 
 
+_lh_cache = {}
+
+
+def line_height(font, size, bold=False):
+    """Height in pixels of one line of text in this font (the font's own ascent + descent)."""
+    key = (font, round(size, 1), bold)
+    h = _lh_cache.get(key)
+    if h is None:
+        try:
+            lab = CoreLabel(text='Ag\u0644', font_name=font, font_size=size, bold=bold)
+            lab.refresh()
+            h = float(lab.texture.height)
+        except Exception:
+            h = size * 1.4
+        _lh_cache[key] = h
+    return h
+
+
 class Txt(Label):
     """Label that takes *logical* text (Arabic / English) and does shaping, bidi,
     ellipsis and wrapping by itself."""
@@ -158,6 +176,11 @@ class Txt(Label):
             self.halign = mode
         self.text = vis
         self.text_size = (w, self.height)
+
+    def text_height(self, lines=None):
+        """Height that `lines` lines (default: as many as the text really needs) of this label take."""
+        n = lines if lines is not None else len(self.logical_lines())
+        return max(1, n) * line_height(font_for(self.ltext or 'a'), self.font_size, self.bold)
 
     def logical_lines(self):
         """The lines the text is wrapped into (logical order), at the current width."""
@@ -312,6 +335,47 @@ ICONS = {
 }
 
 
+_ATLAS = {'tried': False, 'tex': None, 'mod': None, 'regions': {}}
+
+
+def _icon_region(name):
+    """Texture region of the named icon in ui_icons.png (professionally drawn Phosphor / Material icons),
+    or None when the atlas is missing, so that the vector drawings below still work."""
+    A = _ATLAS
+    if not A['tried']:
+        A['tried'] = True
+        try:
+            import iconatlas
+            for d in (os.path.join(HERE, 'assets', 'icons'), HERE):
+                p = os.path.join(d, 'ui_icons.png')
+                if os.path.exists(p):
+                    tex = CoreImage(p, mipmap=True).texture
+                    if tex is not None and tex.width == iconatlas.SIZE:
+                        try:
+                            tex.min_filter = 'linear_mipmap_linear'
+                            tex.mag_filter = 'linear'
+                        except Exception:
+                            pass
+                        A['tex'], A['mod'] = tex, iconatlas
+                        break
+        except Exception:
+            A['tex'] = None
+    if A['tex'] is None:
+        return None
+    reg = A['regions'].get(name)
+    if reg is None:
+        mod = A['mod']
+        if name not in mod.ATLAS:
+            return None
+        col, row = mod.ATLAS[name]
+        try:
+            reg = A['tex'].get_region(col * mod.CELL, mod.SIZE - (row + 1) * mod.CELL, mod.CELL, mod.CELL)
+        except Exception:
+            return None
+        A['regions'][name] = reg
+    return reg
+
+
 class Icon(Widget):
     name = StringProperty('play')
     color = ListProperty([1, 1, 1, 1])
@@ -326,8 +390,18 @@ class Icon(Widget):
 
     def _draw(self, *a):
         self.canvas.clear()
+        if self.width < 2:
+            return
+        reg = _icon_region(self.name)
+        if reg is not None:
+            d = min(self.width, self.height) * 0.9          # the drawings fill their whole square
+            with self.canvas:
+                Color(*self.color)
+                Rectangle(texture=reg, pos=(self.x + (self.width - d) / 2.0, self.y + (self.height - d) / 2.0),
+                          size=(d, d))
+            return
         ops = ICONS.get(self.name)
-        if not ops or self.width < 2:
+        if not ops:
             return
         u = min(self.width, self.height) / 24.0
         ox = (self.x + self.width / 2.0) - 12 * u
@@ -1660,31 +1734,20 @@ class Overlay(FloatLayout):
             return True
         if self.panel is not None and self.panel.collide_point(*touch.pos):
             return True
-        # A press outside the panel belongs to the overlay for its whole life: it is taken here (so the
-        # page underneath never sees it) and the overlay closes when the finger lifts, like the scrim
-        # of a native bottom sheet.
-        touch.grab(self)
-        self._outside = (touch.uid, touch.x, touch.y)
+        # A press outside the panel only closes the overlay.  The rest of that touch, and any press
+        # right after it, is swallowed by the root so it can never press what lies under the finger.
+        if self.cancelable:
+            guard = getattr(self.root, 'guard_touches', None)
+            if guard:
+                guard(touch)
+            self.dismiss()
         return True
 
     def on_touch_move(self, touch):
-        if touch.grab_current is self:
-            return True
         FloatLayout.on_touch_move(self, touch)
         return True
 
     def on_touch_up(self, touch):
-        if touch.grab_current is self:
-            touch.ungrab(self)
-            o = getattr(self, '_outside', None)
-            self._outside = None
-            if o and o[0] == touch.uid and self.cancelable and \
-                    abs(touch.x - o[1]) < dp(24) and abs(touch.y - o[2]) < dp(24):
-                guard = getattr(self.root, 'guard_touches', None)
-                if guard:
-                    guard()
-                self.dismiss()
-            return True
         FloatLayout.on_touch_up(self, touch)
         return True
 

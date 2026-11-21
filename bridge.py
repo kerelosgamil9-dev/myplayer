@@ -806,6 +806,16 @@ def _setup_insets_ui(bg_color):
         log(traceback.format_exc())
 
 
+def target_sdk():
+    """The targetSdkVersion this installed app was built for (0 when it is not running on Android)."""
+    if not ANDROID:
+        return 0
+    try:
+        return int(_activity().getApplicationInfo().targetSdkVersion)
+    except Exception:
+        return 0
+
+
 def setup_window_insets(bg_color=0xFF000000):
     """Call once at start-up.  Only Android 15+ (API 35) forces edge-to-edge drawing."""
     if ANDROID and sdk_int() >= 35:

@@ -82,9 +82,11 @@ class Root(FloatLayout):
         self._guard_until = 0.0
         self._eaten = set()
 
-    def guard_touches(self, sec=0.5):
-        """Right after a sheet is closed by a tap outside it, ignore new presses for a moment, so the
-        same tap (or an echo of it) can never open whatever lies under the finger."""
+    def guard_touches(self, touch=None, sec=0.7):
+        """A sheet was just closed by a press outside it: the rest of that touch is ignored, and so is
+        every new press for a moment, so the tap (or an echo of it) can never open what lies under it."""
+        if touch is not None:
+            self._eaten.add(touch.uid)
         self._guard_until = time.time() + sec
 
     def on_touch_down(self, touch):
@@ -281,7 +283,7 @@ class VideoRow(ListRow):
     def __init__(self, **kw):
         super(VideoRow, self).__init__(**kw)
         self.thumb = Thumb(radius=dp(12), size=(dp(128), dp(72)))
-        self.title = Txt(font_size=sp(15.5), nlines=2, valign='bottom', size_hint=(None, None))
+        self.title = Txt(font_size=sp(15.5), nlines=2, valign='top', size_hint=(None, None))
         self.info = Txt(font_size=sp(12.5), color=SUB, valign='top', size_hint=(None, None))
         self.badge = Tag()
         for w in (self.thumb, self.title, self.info, self.badge):
@@ -324,10 +326,17 @@ class VideoRow(ListRow):
         left = self.left_bound()
         tx_right = self.thumb.x - dp(14)
         w = max(10, tx_right - left)
-        self.title.pos = (left, cy)
-        self.title.size = (w, th / 2.0 + dp(6))
-        self.info.pos = (left, cy - th / 2.0 + dp(2))
-        self.info.size = (w, th / 2.0 - dp(8))
+        # the title may need two lines: stack title + info as one block, centred on the thumbnail
+        self.title.size = (w, dp(10))
+        n = len(self.title.logical_lines())
+        ht = self.title.text_height(n)
+        hi = self.info.text_height(1)
+        gap = dp(1)
+        top = cy + (ht + gap + hi) / 2.0
+        self.title.pos = (left, top - ht)
+        self.title.size = (w, ht)
+        self.info.pos = (left, top - ht - gap - hi)
+        self.info.size = (w, hi)
         watched = self.frac > 0.02
         self.badge.pos = (self.thumb.x + tw - dp(6) - self.badge.width,
                           self.thumb.y + (dp(11) if watched else dp(6)))
@@ -975,7 +984,9 @@ class SettingsPane(FloatLayout):
             self.switch('vibrate', 'الاهتزاز', 'عند تحديد العناصر', 'bolt'),
             SettingRow('استعادة القوائم المحذوفة', '', icon='restore',
                        value=('%d' % n_back) if n_back else '—', callback=lambda w: self.restore())])
-        box.add_widget(SheetLabel('Pro Player  •  بناء %s' % core.BUILD, muted=True))
+        tsdk = bridge.target_sdk()
+        box.add_widget(SheetLabel('Pro Player  •  بناء %s%s' % (core.BUILD, ('  •  API %d' % tsdk) if tsdk else ''),
+                                  muted=True))
 
     def pick_number(self, key, title, options, fmt):
         cur = self.S(key)

@@ -291,7 +291,12 @@ def load_subtitle(path):
 # ---------------------------------------------------------------------------
 # persistence
 # ---------------------------------------------------------------------------
-BUILD = 'r9'                # shown at the bottom of the settings: tells which upload is installed
+def pretty_title(name):
+    """File names use '_' instead of spaces; show spaces (so long names can wrap at word breaks)."""
+    return ' '.join(str(name).replace('_', ' ').split()) or str(name)
+
+
+BUILD = 'r10'                # shown at the bottom of the settings: tells which upload is installed
 MIN_RESUME = 3.0          # seconds: less than this watched = starts from zero, no progress bar
 
 
@@ -473,7 +478,7 @@ class Library(object):
             bid = str(v.get('bucket_id') or os.path.dirname(key))
             b = self.buckets.get(bid)
             if b is None:
-                b = {'id': bid, 'name': v.get('bucket') or os.path.basename(os.path.dirname(key)) or '?',
+                b = {'id': bid, 'name': pretty_title(v.get('bucket') or os.path.basename(os.path.dirname(key)) or '?'),
                      'path': os.path.dirname(key), 'keys': []}
                 self.buckets[bid] = b
             b['keys'].append(key)
@@ -487,7 +492,7 @@ class Library(object):
         if t:
             return t
         v = self.videos.get(key)
-        return v['title'] if v else os.path.splitext(os.path.basename(key))[0]
+        return pretty_title(v['title'] if v else os.path.splitext(os.path.basename(key))[0])
 
     def rename_video(self, key, title):
         title = (title or '').strip()

@@ -1,0 +1,6 @@
+The icons in ui_icons.png come from two open icon sets (via the react-icons package):
+
+- Phosphor Icons  (c) 2020 Phosphor Icons - MIT License
+  https://github.com/phosphor-icons/core
+- Material Design Icons (c) Google - Apache License 2.0
+  https://github.com/google/material-design-icons

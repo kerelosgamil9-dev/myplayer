@@ -418,7 +418,7 @@ class PlayerPage(Page):
         self.dur = Txt(font_size=sp(13), halign='right', color=(1, 1, 1, 0.72), size_hint=(None, None))
         self.seek = SeekBar(on_start=self._seek_start, on_move=self._seek_move, on_end=self._seek_end,
                             size_hint=(None, None), size=(dp(100), dp(36)))
-        self.btn_lock = IconButton('unlock', callback=lambda w: self.set_lock(True), bg=SIDEBG, bg_d=dp(40), icon_size=dp(21))
+        self.btn_lock = IconButton('unlock', callback=lambda w: self.set_lock(True), bg=SIDEBG, bg_d=dp(40), icon_size=dp(24))
         self.btn_prev = IconButton('prev', callback=lambda w: self.prev())
         self.btn_rew = StepButton('back', callback=lambda w: self.skip(-self._step()), value=self._step())
         self.btn_play = IconButton('pause', callback=lambda w: self.toggle_play(), icon_size=dp(30),
