@@ -42,8 +42,28 @@ jobs:
           python -m pip install --upgrade pip
           pip install buildozer "cython<3" virtualenv setuptools
 
+      - name: Show the target API from buildozer.spec
+        run: |
+          API=$(grep -E '^android.api' buildozer.spec | head -1)
+          echo "::notice title=spec::$API"
+
+      - name: Drop the cached dist (forces the manifest and gradle files to be regenerated for the current target API)
+        run: rm -rf .buildozer/android/platform/build-*/dists
+
       - name: Build debug APK
         run: buildozer -v android debug
+
+      - name: Show the target SDK of the built APK
+        if: always()
+        run: |
+          APK=$(ls bin/*.apk 2>/dev/null | head -1)
+          AAPT=$(ls ~/.buildozer/android/platform/android-sdk/build-tools/*/aapt 2>/dev/null | tail -1)
+          if [ -n "$APK" ] && [ -n "$AAPT" ]; then
+            T=$("$AAPT" dump badging "$APK" 2>/dev/null | grep -E "targetSdkVersion|sdkVersion:" | tr '\n' ' ')
+            echo "::warning title=APK target SDK::$T"
+          else
+            echo "::warning title=APK target SDK::aapt or apk not found"
+          fi
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
