@@ -756,12 +756,85 @@ def set_orientation(mode):
         _set_orientation_ui(mode)
 
 
+_INSETS = {'listener': None}
+
+
+def _make_insets_listener():
+    """View.OnApplyWindowInsetsListener that pads the activity's content view by the system bars (and
+    keyboard), because Android 15+ draws every app edge to edge, under the status and navigation bars."""
+    from jnius import PythonJavaClass, java_method
+
+    class _Insets(PythonJavaClass):
+        __javainterfaces__ = ['android/view/View$OnApplyWindowInsetsListener']
+        __javacontext__ = 'app'
+
+        @java_method('(Landroid/view/View;Landroid/view/WindowInsets;)Landroid/view/WindowInsets;')
+        def onApplyWindowInsets(self, v, insets):
+            try:
+                T = autoclass('android.view.WindowInsets$Type')
+                bars = insets.getInsets(T.systemBars() | T.displayCutout())
+                ime = insets.getInsets(T.ime())
+                v.setPadding(int(bars.left), int(bars.top), int(bars.right),
+                             int(max(bars.bottom, ime.bottom)))
+            except Exception:
+                log(traceback.format_exc())
+            return insets
+    return _Insets()
+
+
+@run_on_ui_thread
+def _setup_insets_ui(bg_color):
+    try:
+        act = _activity()
+        win = act.getWindow()
+        try:
+            win.getDecorView().setBackgroundColor(int(bg_color))
+        except Exception:
+            log(traceback.format_exc())
+        try:                                         # light icons on our dark bars
+            ctl = win.getInsetsController()
+            WIC = autoclass('android.view.WindowInsetsController')
+            ctl.setSystemBarsAppearance(0, WIC.APPEARANCE_LIGHT_STATUS_BARS |
+                                        WIC.APPEARANCE_LIGHT_NAVIGATION_BARS)
+        except Exception:
+            log(traceback.format_exc())
+        content = act.findViewById(16908290)         # android.R.id.content
+        _INSETS['listener'] = _make_insets_listener()     # kept alive: Java only holds a weak handle
+        content.setOnApplyWindowInsetsListener(_INSETS['listener'])
+        content.requestApplyInsets()
+    except Exception:
+        log(traceback.format_exc())
+
+
+def setup_window_insets(bg_color=0xFF000000):
+    """Call once at start-up.  Only Android 15+ (API 35) forces edge-to-edge drawing."""
+    if ANDROID and sdk_int() >= 35:
+        c = int(bg_color) & 0xFFFFFFFF
+        if c > 0x7FFFFFFF:                           # Java ints are signed
+            c -= 0x100000000
+        _setup_insets_ui(c)
+
+
 @run_on_ui_thread
 def _immersive_ui(on):
     try:
         act = _activity()
+        win = act.getWindow()
+        if sdk_int() >= 30:
+            try:
+                T = autoclass('android.view.WindowInsets$Type')
+                WIC = autoclass('android.view.WindowInsetsController')
+                ctl = win.getInsetsController()
+                if on:
+                    ctl.setSystemBarsBehavior(WIC.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE)
+                    ctl.hide(T.systemBars())
+                else:
+                    ctl.show(T.systemBars())
+                return
+            except Exception:
+                log(traceback.format_exc())
         View = autoclass('android.view.View')
-        decor = act.getWindow().getDecorView()
+        decor = win.getDecorView()
         if on:
             flags = (View.SYSTEM_UI_FLAG_LAYOUT_STABLE | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
                      View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY |

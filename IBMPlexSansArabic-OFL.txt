@@ -1,3 +1,7 @@
+NOTE: ProArabic-Regular.ttf and ProArabic-SemiBold.ttf in this app are modified versions of IBM Plex Sans
+Arabic (the 'GSUB' ligature tables were removed so that pre-shaped Arabic text is not re-shaped; the font
+family was renamed to 'ProArabic' because the Reserved Font Name "Plex" may not be used by modified versions).
+
 Copyright © 2017 IBM Corp. with Reserved Font Name "Plex"
 
 This Font Software is licensed under the SIL Open Font License, Version 1.1.

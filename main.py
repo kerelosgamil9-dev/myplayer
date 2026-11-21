@@ -98,6 +98,7 @@ class ProPlayerApp(App):
         self._install_error_overlay()
         widgets.register_fonts()
         Window.clearcolor = (0, 0, 0, 1)
+        bridge.setup_window_insets(widgets.BG_INT)
         self.store = core.Store(os.path.join(bridge.data_dir(self), 'library.json'), background=True)
         self.lib = core.Library(self.store)
         self.thumbs = bridge.ThumbService(self)

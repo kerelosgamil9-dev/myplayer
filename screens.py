@@ -3,6 +3,8 @@
 screens.py - navigation root, rows, home page (playlists / folders / videos /
 history / me), collection page and the video picker.
 """
+import time
+
 from kivy.clock import Clock
 from kivy.graphics import Color, Ellipse, Line, Rectangle, RoundedRectangle, Triangle
 from kivy.metrics import dp, sp
@@ -15,8 +17,7 @@ import core
 import textfix
 from widgets import (ACCENT, ACCENT_SOFT, BG, DANGER, DIVIDER, SUB, SURFACE, SURFACE2, TEXT,
                      ChipsRow, Dialog, EmptyState, FieldInput, Group, Icon, IconButton, MenuSheet,
-                     PromptDialog, Row, SheetButton, SheetLabel, SheetRow, SheetTitle, PillSwitch, Tap,
-                     Thumb, Tag, Toast, Txt, VList, icon_chip, make_scroll)
+                     PromptDialog, Row, SettingRow, SheetButton, SheetLabel, SheetRow, SheetTitle, PillSwitch, Thumb, Tag, Toast, Txt, VList, make_scroll)
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +79,30 @@ class Root(FloatLayout):
         self._covered = []           # (page, [pages taken out of the tree while it is on top])
         self.toast = Toast()
         self.add_widget(self.toast)
+        self._guard_until = 0.0
+        self._eaten = set()
+
+    def guard_touches(self, sec=0.5):
+        """Right after a sheet is closed by a tap outside it, ignore new presses for a moment, so the
+        same tap (or an echo of it) can never open whatever lies under the finger."""
+        self._guard_until = time.time() + sec
+
+    def on_touch_down(self, touch):
+        if time.time() < self._guard_until:
+            self._eaten.add(touch.uid)
+            return True
+        return FloatLayout.on_touch_down(self, touch)
+
+    def on_touch_move(self, touch):
+        if touch.uid in self._eaten:
+            return True
+        return FloatLayout.on_touch_move(self, touch)
+
+    def on_touch_up(self, touch):
+        if touch.uid in self._eaten:
+            self._eaten.discard(touch.uid)
+            return True
+        return FloatLayout.on_touch_up(self, touch)
 
     def _raise_layers(self):
         for ov in self.overlays:
@@ -831,35 +856,6 @@ class NavBar(Widget):
 # ---------------------------------------------------------------------------
 # settings pane
 # ---------------------------------------------------------------------------
-class SwitchRow(Tap):
-    def __init__(self, label, value, on_change, icon=None, **kw):
-        kw.setdefault('size_hint', (1, None))
-        kw.setdefault('height', dp(62))
-        super(SwitchRow, self).__init__(callback=lambda w: self.sw._toggle(), **kw)
-        self.lbl = Txt(ltext=label, font_size=sp(15.5), size_hint=(None, None), nlines=2)
-        self.sw = PillSwitch(value=value, on_change=on_change)
-        self.icon = Icon(name=icon, size=(dp(22), dp(22))) if icon else None
-        for w in (self.icon, self.lbl, self.sw):
-            if w is not None:
-                self.add_widget(w)
-        self.bind(pos=self._lay, size=self._lay)
-        self._lay()
-
-    def _lay(self, *a):
-        pad = dp(18)
-        cy = self.y + self.height / 2.0
-        self.canvas.before.clear()
-        self.sw.pos = (self.x + pad, cy - self.sw.height / 2.0)
-        right = (self.x + self.width) - pad
-        if self.icon is not None:
-            self.icon.center = (right - dp(19), cy)
-            icon_chip(self.canvas.before, right - dp(19), cy, dp(38))
-            right -= dp(52)
-        left = self.x + pad + self.sw.width + dp(12)
-        self.lbl.pos = (left, self.y)
-        self.lbl.size = (max(10, right - left), self.height)
-
-
 _app_grad = {}
 
 
@@ -934,13 +930,18 @@ class SettingsPane(FloatLayout):
     def card(self, title, rows):
         """A heading and a rounded card with the given rows."""
         self.box.add_widget(SheetLabel(title))
-        g = Group()
+        g = Group(inset=(dp(16), dp(16) + SettingRow.TILE + dp(13)))
         for r in rows:
             g.add_row(r)
         self.box.add_widget(g)
 
-    def switch(self, key, label, icon):
-        return SwitchRow(label, bool(self.S(key)), lambda v, k=key: self.put(k, v), icon=icon)
+    def switch(self, key, title, sub, icon):
+        sw = PillSwitch(value=bool(self.S(key)), on_change=lambda v, k=key: self.put(k, v))
+        return SettingRow(title, sub, icon=icon, switch=sw, callback=lambda w: sw._toggle())
+
+    def choice(self, key, title, sub, icon, options, fmt):
+        return SettingRow(title, sub, icon=icon, value=fmt(self.S(key)),
+                          callback=lambda w: self.pick_number(key, title, options, fmt))
 
     def build(self):
         lib = self.app.lib
@@ -951,31 +952,29 @@ class SettingsPane(FloatLayout):
         head = AppCard()
         head.set_summary('%d فيديو  •  %d قائمة تشغيل' % (n_vid, n_pl))
         box.add_widget(head)
-        rows = [self.switch('resume', 'استكمال من آخر مكان توقفت عنده', 'clock'),
-                self.switch('autoplay_next', 'تشغيل الفيديو التالي تلقائياً', 'next'),
-                self.switch('gestures', 'إيماءات السحب (تقديم / سطوع / صوت)', 'tune'),
-                self.switch('keep_awake', 'إبقاء الشاشة مضاءة أثناء التشغيل', 'brightness'),
-                self.switch('sub_on', 'تشغيل الترجمة تلقائياً إن وجدت', 'subtitle'),
-                self.switch('vibrate', 'اهتزاز عند التحديد', 'bolt')]
+        play = [self.switch('resume', 'استكمال التشغيل', 'من آخر مكان توقفت عنده', 'clock'),
+                self.switch('autoplay_next', 'الفيديو التالي تلقائياً', 'عند انتهاء الفيديو الحالي', 'next'),
+                self.switch('keep_awake', 'إبقاء الشاشة مضاءة', 'أثناء تشغيل الفيديو', 'brightness')]
         if bridge.ANDROID and (not bridge.hw_enabled() or bridge.hw_bad_count()):
             # hardware decoding was switched off after a failure: let the user try it again
-            rows.append(SheetRow('إعادة تفعيل التشغيل بالهاردوير', icon='restore',
-                                 callback=lambda w: self.reset_hw()))
-        self.card('التشغيل', rows)
-        self.card('خيارات', [
-            SheetRow('السرعة عند الضغط المطول', icon='speed', value=core.fmt_speed(self.S('hold_speed')),
-                     callback=lambda w: self.pick_number('hold_speed', 'السرعة عند الضغط المطول',
-                                                         [1.5, 2.0, 2.5, 3.0], core.fmt_speed)),
-            SheetRow('مدة التقديم / الترجيع', icon='step_fwd', value='%d ث' % self.S('seek_step'),
-                     callback=lambda w: self.pick_number('seek_step', 'مدة التقديم / الترجيع',
-                                                         [5, 10, 15, 30], lambda x: '%d ث' % x)),
-            SheetRow('حجم الترجمة', icon='subtitle', value=str(self.S('sub_size')),
-                     callback=lambda w: self.pick_number('sub_size', 'حجم الترجمة',
-                                                         [16, 20, 22, 26, 30, 36], str))])
+            play.append(SettingRow('إعادة تفعيل الهاردوير', 'تم إيقافه بعد مشكلة في التشغيل', icon='restore',
+                                   callback=lambda w: self.reset_hw()))
+        self.card('التشغيل', play)
+        self.card('التحكم', [
+            self.switch('gestures', 'إيماءات السحب', 'تقديم وترجيع، سطوع، صوت', 'tune'),
+            self.choice('hold_speed', 'السرعة عند الضغط المطول', '', 'speed', [1.5, 2.0, 2.5, 3.0],
+                        core.fmt_speed),
+            self.choice('seek_step', 'مدة التقديم والترجيع', '', 'step_fwd', [5, 10, 15, 30],
+                        lambda x: '%d ث' % x)])
+        self.card('الترجمة', [
+            self.switch('sub_on', 'تشغيل الترجمة تلقائياً', 'إن وُجد ملف ترجمة', 'subtitle'),
+            self.choice('sub_size', 'حجم الترجمة', '', 'edit', [16, 20, 22, 26, 30, 36],
+                        lambda x: str(int(x)))])
         n_back = len(lib.restorable())
-        self.card('القوائم', [
-            SheetRow('استعادة القوائم المحذوفة', icon='restore',
-                     value=('%d' % n_back) if n_back else '', callback=lambda w: self.restore())])
+        self.card('عام', [
+            self.switch('vibrate', 'الاهتزاز', 'عند تحديد العناصر', 'bolt'),
+            SettingRow('استعادة القوائم المحذوفة', '', icon='restore',
+                       value=('%d' % n_back) if n_back else '—', callback=lambda w: self.restore())])
         box.add_widget(SheetLabel('Pro Player  •  بناء %s' % core.BUILD, muted=True))
 
     def pick_number(self, key, title, options, fmt):

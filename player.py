@@ -35,6 +35,10 @@ REPEAT_LABELS = {'off': 'بدون تكرار', 'one': 'تكرار الفيديو
 SLEEP_OPTIONS = [0, 15, 30, 45, 60, 90]
 
 
+TOPBG = (1, 1, 1, 0.10)             # soft discs behind the top bar buttons
+SIDEBG = (1, 1, 1, 0.12)            # ... and behind lock / rotate
+
+
 class Feedback(Widget):
     """Base of the little animations drawn over the video.  They never take touches, stay for a
     moment and then fade out."""
@@ -404,28 +408,29 @@ class PlayerPage(Page):
 
         self.ctl = FloatLayout(size_hint=(1, 1))
         self.add_widget(self.ctl)
-        self.btn_back = IconButton('back', callback=lambda w: self.app.root.back())
+        self.btn_back = IconButton('back', callback=lambda w: self.app.root.back(), bg=TOPBG, bg_d=dp(40))
         self.title = Txt(font_size=sp(16.5), align_mode='auto', size_hint=(None, None), bold=True)
         self.qinfo = Txt(font_size=sp(12), color=(1, 1, 1, 0.66), align_mode='left', size_hint=(None, None))
-        self.btn_cc = IconButton('subtitle', callback=lambda w: self.subtitle_menu())
-        self.btn_more = IconButton('dots', callback=lambda w: self.main_menu())
+        self.btn_cc = IconButton('subtitle', callback=lambda w: self.subtitle_menu(), bg=TOPBG, bg_d=dp(40),
+                                 icon_size=dp(22))
+        self.btn_more = IconButton('dots', callback=lambda w: self.main_menu(), bg=TOPBG, bg_d=dp(40))
         self.cur = Txt(font_size=sp(13), halign='left', bold=True, size_hint=(None, None))
         self.dur = Txt(font_size=sp(13), halign='right', color=(1, 1, 1, 0.72), size_hint=(None, None))
         self.seek = SeekBar(on_start=self._seek_start, on_move=self._seek_move, on_end=self._seek_end,
                             size_hint=(None, None), size=(dp(100), dp(36)))
-        self.btn_lock = IconButton('unlock', callback=lambda w: self.set_lock(True))
+        self.btn_lock = IconButton('unlock', callback=lambda w: self.set_lock(True), bg=SIDEBG, bg_d=dp(40), icon_size=dp(21))
         self.btn_prev = IconButton('prev', callback=lambda w: self.prev())
         self.btn_rew = StepButton('back', callback=lambda w: self.skip(-self._step()), value=self._step())
-        self.btn_play = IconButton('pause', callback=lambda w: self.toggle_play(), icon_size=dp(34),
-                                   size=(dp(64), dp(64)), bg=(1, 1, 1, 0.16))
+        self.btn_play = IconButton('pause', callback=lambda w: self.toggle_play(), icon_size=dp(30),
+                                   size=(dp(64), dp(64)), bg=(1, 1, 1, 0.95), color=(0.06, 0.06, 0.08, 1))
         self.btn_fwd = StepButton('fwd', callback=lambda w: self.skip(self._step()), value=self._step())
         self.btn_next = IconButton('next', callback=lambda w: self.next())
         for b in (self.btn_prev, self.btn_next):
             b.size = (dp(48), dp(48))
             b.icon.size = (dp(28), dp(28))
-        self.btn_rot = IconButton('screen_rotate', callback=lambda w: self.rotate())
+        self.btn_rot = IconButton('screen_rotate', callback=lambda w: self.rotate(), bg=SIDEBG, bg_d=dp(40), icon_size=dp(23))
         self.btn_unlock = IconButton('lock', color=ACCENT, callback=lambda w: self.set_lock(False),
-                                     size=(dp(56), dp(56)), bg=SCRIM)
+                                     size=(dp(56), dp(56)), bg=(0.17, 0.17, 0.2, 0.92), bg_d=dp(48))
         for w in (self.btn_back, self.title, self.qinfo, self.btn_cc, self.btn_more, self.cur, self.dur,
                   self.seek, self.btn_lock, self.btn_prev, self.btn_rew, self.btn_play, self.btn_fwd,
                   self.btn_next, self.btn_rot):

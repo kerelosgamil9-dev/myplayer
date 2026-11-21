@@ -10,6 +10,7 @@ import os
 import time
 from collections import OrderedDict
 
+from kivy.animation import Animation
 from kivy.clock import Clock
 from kivy.core.image import Image as CoreImage
 from kivy.core.text import Label as CoreLabel, LabelBase
@@ -34,6 +35,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # theme
 # ---------------------------------------------------------------------------
 BG = (0.031, 0.033, 0.043, 1)
+BG_INT = 0xFF000000 | (int(round(BG[0] * 255)) << 16) | (int(round(BG[1] * 255)) << 8) | int(round(BG[2] * 255))
 SURFACE = (0.082, 0.087, 0.108, 1)
 SURFACE2 = (0.128, 0.134, 0.160, 1)
 ACCENT = (1.0, 0.42, 0.37, 1)
@@ -62,12 +64,12 @@ def _find_font(*names):
 def register_fonts():
     """IBM Plex Sans Arabic (clean, modern; Arabic + Latin in one family); DejaVu if it is missing."""
     global LATIN_FONT
-    reg = _find_font('IBMPlexSansArabic-Regular.ttf', 'DejaVuSans.ttf')
-    bold = _find_font('IBMPlexSansArabic-SemiBold.ttf', 'DejaVuSans-Bold.ttf') or reg
+    reg = _find_font('ProArabic-Regular.ttf', 'DejaVuSans.ttf')
+    bold = _find_font('ProArabic-SemiBold.ttf', 'DejaVuSans-Bold.ttf') or reg
     if reg is None:
         return
     LabelBase.register(name=AR_FONT, fn_regular=reg, fn_bold=bold)
-    if 'IBMPlex' in os.path.basename(reg):
+    if 'ProArabic' in os.path.basename(reg):
         LATIN_FONT = AR_FONT
 
 
@@ -186,6 +188,15 @@ def _arc(cx, cy, r, a0, a1, n=18):
     return pts
 
 
+def _rrect(x0, y0, x1, y1, r, n=5):
+    """Closed outline of a rounded rectangle (24 grid, y down)."""
+    pts = []
+    for (cx, cy, a0) in ((x1 - r, y0 + r, 270), (x1 - r, y1 - r, 0), (x0 + r, y1 - r, 90), (x0 + r, y0 + r, 180)):
+        pts.extend(_arc(cx, cy, r, a0, a0 + 90, n))
+    pts.append(pts[0])
+    return pts
+
+
 def _arrow_head(cx, cy, r, a, h=4.0):
     import math
     ar = math.radians(a)
@@ -220,7 +231,7 @@ def _mirror(ops):
     return out
 
 
-_STEP_FWD = [('line', _arc(12, 13.2, 8.2, 300, 603, 30)), _arrow_fill(12, 13.2, 8.2, 603, 3.8)]
+_STEP_FWD = [('line', _arc(12, 13.2, 8.2, 300, 603, 30)), _arrow_fill(12, 13.2, 8.2, 603, 3.5)]
 
 ICONS = {
     'play': [('fill', [(7, 4), (20, 12), (7, 20)])],
@@ -254,14 +265,15 @@ ICONS = {
     'select_all': [('line', [(4, 7), (4, 20), (17, 20)]), ('line', [(8, 4), (20, 4), (20, 16), (8, 16), (8, 4)]),
                    ('line', [(11, 10), (13.5, 12.5), (17, 8)])],
     'rotate': [('line', _arc(12, 12, 7.5, 40, 330)), _arrow_fill(12, 12, 7.5, 330, 4.2)],
-    'lock': [('line', [(6, 11), (18, 11), (19.5, 12.5), (19.5, 19), (18, 20.5), (6, 20.5), (4.5, 19), (4.5, 12.5), (6, 11)]),
-             ('line', [(8, 11), (8, 8)] + _arc(12, 8, 4, 180, 360) + [(16, 8), (16, 11)]), ('dot', 12, 15.8, 1.5)],
-    'unlock': [('line', [(6, 11), (18, 11), (19.5, 12.5), (19.5, 19), (18, 20.5), (6, 20.5), (4.5, 19), (4.5, 12.5), (6, 11)]),
-               ('line', [(8, 11), (8, 8)] + _arc(12, 8, 4, 180, 360) + [(16, 8), (16, 5.5)]), ('dot', 12, 15.8, 1.5)],
+    'lock': [('line', _rrect(5, 10.5, 19, 20.5, 2.6)),
+             ('line', [(8.2, 10.5), (8.2, 7.8)] + _arc(12, 7.8, 3.8, 180, 360, 12) + [(15.8, 7.8), (15.8, 10.5)]),
+             ('dot', 12, 15.0, 1.45), ('line', [(12, 15.4), (12, 17.6)])],
+    'unlock': [('line', _rrect(5, 10.5, 19, 20.5, 2.6)),
+               ('line', [(8.2, 10.5), (8.2, 6.6)] + _arc(12, 6.6, 3.8, 180, 360, 12) + [(15.8, 6.6), (15.8, 8.0)]),
+               ('dot', 12, 15.0, 1.45), ('line', [(12, 15.4), (12, 17.6)])],
     'speed': [('line', _arc(12, 15, 9, 190, 350, 22)), ('line', [(12, 15), (16.5, 10)]), ('dot', 12, 15, 1.6)],
-    'subtitle': [('line', [(5, 4), (19, 4), (21, 6), (21, 18), (19, 20), (5, 20), (3, 18), (3, 6), (5, 4)]),
-                 ('line', [(6.5, 10), (10, 10)]), ('line', [(13, 10), (17.5, 10)]),
-                 ('line', [(6.5, 14.5), (11, 14.5)]), ('line', [(14, 14.5), (17.5, 14.5)])],
+    'subtitle': [('line', _rrect(3, 5, 21, 19, 3.2)),
+                 ('line', _arc(9.0, 12, 2.6, 42, 318, 12)), ('line', _arc(15.4, 12, 2.6, 42, 318, 12))],
     'audio': [('dot', 8, 18, 3), ('line', [(11, 18), (11, 5), (19, 7.5)])],
     'brightness': [('circle', 12, 12, 4)] + [('line', [(12 + 7 * math.cos(math.radians(a)), 12 + 7 * math.sin(math.radians(a))),
                                                        (12 + 10 * math.cos(math.radians(a)), 12 + 10 * math.sin(math.radians(a)))])
@@ -295,9 +307,8 @@ ICONS = {
     'share': [('circle', 18, 5.5, 2.7), ('circle', 6, 12, 2.7), ('circle', 18, 18.5, 2.7),
               ('line', [(8.4, 10.7), (15.6, 6.8)]), ('line', [(8.4, 13.3), (15.6, 17.2)])],
     # a phone with a turning arrow on each side: rotate the screen
-    'screen_rotate': [('line', [(9.2, 7.5), (14.8, 7.5), (14.8, 16.5), (9.2, 16.5), (9.2, 7.5)]),
-                      ('line', _arc(12, 12, 9.4, 305, 385, 14)), _arrow_fill(12, 12, 9.4, 385, 3.4),
-                      ('line', _arc(12, 12, 9.4, 125, 205, 14)), _arrow_fill(12, 12, 9.4, 205, 3.4)],
+    'screen_rotate': [('line', _rrect(4.5, 9.5, 16.5, 19.5, 2.2)),
+                      ('line', _arc(11.5, 12.5, 9.5, 232, 330, 10)), ('line', _arrow_head(11.5, 12.5, 9.5, 330, 3.3))],
 }
 
 
@@ -451,11 +462,12 @@ class Tap(Widget):
 
 
 class IconButton(Tap):
-    def __init__(self, icon='play', callback=None, color=None, icon_size=None, bg=None, **kw):
+    def __init__(self, icon='play', callback=None, color=None, icon_size=None, bg=None, bg_d=None, **kw):
         kw.setdefault('size_hint', (None, None))
         kw.setdefault('size', (dp(48), dp(48)))
         super(IconButton, self).__init__(callback=callback, **kw)
         self.bg = bg
+        self.bg_d = bg_d                      # disc diameter (default: the whole button)
         self.bind(pos=self._draw_bg, size=self._draw_bg)
         isz = icon_size or dp(24)
         self.icon = Icon(name=icon, size=(isz, isz), color=list(color or TEXT))
@@ -466,7 +478,7 @@ class IconButton(Tap):
     def _draw_bg(self, *a):
         self.canvas.before.clear()
         if self.bg:
-            d = min(self.width, self.height)
+            d = self.bg_d or min(self.width, self.height)
             with self.canvas.before:
                 Color(*self.bg)
                 Ellipse(pos=(self.x + (self.width - d) / 2.0, self.y + (self.height - d) / 2.0), size=(d, d))
@@ -492,15 +504,25 @@ class IconButton(Tap):
 
 class PillSwitch(Tap):
     value = BooleanProperty(False)
+    k = NumericProperty(0.0)                     # 0 = off ... 1 = on (animated)
 
     def __init__(self, value=False, on_change=None, **kw):
         kw.setdefault('size_hint', (None, None))
-        kw.setdefault('size', (dp(44), dp(26)))
+        kw.setdefault('size', (dp(46), dp(28)))
         super(PillSwitch, self).__init__(callback=self._toggle, **kw)
         self.on_change = on_change
         self.value = value
-        self.bind(pos=self._draw, size=self._draw, value=self._draw)
+        self.k = 1.0 if value else 0.0
+        self.bind(pos=self._draw, size=self._draw, k=self._draw)
+        self.bind(value=self._slide)
         self._draw()
+
+    def _slide(self, inst, v):
+        Animation.cancel_all(self, 'k')
+        if self.get_root_window() is None:
+            self.k = 1.0 if v else 0.0
+            return
+        Animation(k=1.0 if v else 0.0, d=0.14, transition='out_quad').start(self)
 
     def _toggle(self, *a):
         self.value = not self.value
@@ -513,26 +535,20 @@ class PillSwitch(Tap):
     def _draw(self, *a):
         self.canvas.clear()
         h = self.height
+        k = max(0.0, min(1.0, self.k))
         with self.canvas:
-            if self.value:
-                Color(*ACCENT)
-                RoundedRectangle(pos=self.pos, size=self.size, radius=[h / 2.0])
-            else:                                                   # quiet track with a hairline edge
-                Color(1, 1, 1, 0.16)
-                RoundedRectangle(pos=self.pos, size=self.size, radius=[h / 2.0])
-                Color(0.105, 0.11, 0.135, 1)
-                RoundedRectangle(pos=(self.x + dp(1.3), self.y + dp(1.3)),
-                                 size=(self.width - dp(2.6), self.height - dp(2.6)), radius=[h / 2.0])
-            r = h * (0.36 if self.value else 0.28)
+            off = (0.19, 0.20, 0.235)                                # quiet grey track
+            Color(off[0] + (ACCENT[0] - off[0]) * k, off[1] + (ACCENT[1] - off[1]) * k,
+                  off[2] + (ACCENT[2] - off[2]) * k, 1)
+            RoundedRectangle(pos=self.pos, size=self.size, radius=[h / 2.0])
+            r = h * (0.28 + 0.08 * k)
             pad = h / 2.0
-            cx = (self.x + self.width) - pad if self.value else self.x + pad
+            cx = (self.x + pad) + ((self.x + self.width - pad) - (self.x + pad)) * k
             cy = self.y + self.height / 2.0
-            if self.value:
-                Color(0, 0, 0, 0.18)                                # soft shadow under the knob
+            if k > 0.05:
+                Color(0, 0, 0, 0.18 * k)                              # soft shadow under the knob
                 Ellipse(pos=(cx - r, cy - r - dp(1)), size=(2 * r, 2 * r))
-                Color(1, 1, 1, 1)
-            else:
-                Color(0.66, 0.68, 0.73, 1)
+            Color(0.72 + 0.28 * k, 0.74 + 0.26 * k, 0.79 + 0.21 * k, 1)
             Ellipse(pos=(cx - r, cy - r), size=(2 * r, 2 * r))
 
 
@@ -1644,15 +1660,31 @@ class Overlay(FloatLayout):
             return True
         if self.panel is not None and self.panel.collide_point(*touch.pos):
             return True
-        if self.cancelable:
-            self.dismiss()
+        # A press outside the panel belongs to the overlay for its whole life: it is taken here (so the
+        # page underneath never sees it) and the overlay closes when the finger lifts, like the scrim
+        # of a native bottom sheet.
+        touch.grab(self)
+        self._outside = (touch.uid, touch.x, touch.y)
         return True
 
     def on_touch_move(self, touch):
+        if touch.grab_current is self:
+            return True
         FloatLayout.on_touch_move(self, touch)
         return True
 
     def on_touch_up(self, touch):
+        if touch.grab_current is self:
+            touch.ungrab(self)
+            o = getattr(self, '_outside', None)
+            self._outside = None
+            if o and o[0] == touch.uid and self.cancelable and \
+                    abs(touch.x - o[1]) < dp(24) and abs(touch.y - o[2]) < dp(24):
+                guard = getattr(self.root, 'guard_touches', None)
+                if guard:
+                    guard()
+                self.dismiss()
+            return True
         FloatLayout.on_touch_up(self, touch)
         return True
 
@@ -1734,6 +1766,68 @@ class SheetRow(Tap):
         self.val.size = (vw, self.height)
         self.lbl.pos = (left + vw + dp(6), self.y)
         self.lbl.size = (max(10, right - left - vw - dp(6)), self.height)
+
+
+class SettingRow(Tap):
+    """One line of the settings card: tinted icon tile, title (+ small description) and, on the far
+    side, either a switch or the current value with a chevron."""
+    TILE = dp(38)
+    PAD = dp(16)
+
+    def __init__(self, title, sub='', icon=None, value=None, switch=None, callback=None, **kw):
+        kw.setdefault('height', dp(66) if sub else dp(58))
+        super(SettingRow, self).__init__(callback=callback, **kw)
+        self.icon = Icon(name=icon, color=list(ACCENT), size=(dp(20), dp(20)), stroke=1.7) if icon else None
+        self.lbl = Txt(ltext=title, font_size=sp(15.5), size_hint=(None, None))
+        self.sub = Txt(ltext=sub, color=SUB, font_size=sp(12.5), size_hint=(None, None)) if sub else None
+        self.sw = switch
+        self.val = Txt(ltext=value, color=ACCENT, bold=True, font_size=sp(14), halign='left',
+                       size_hint=(None, None)) if value is not None else None
+        self.chev = Icon(name='chev_left', color=[0.5, 0.52, 0.58, 1], size=(dp(18), dp(18)),
+                         stroke=1.8) if (value is not None) else None
+        for w in (self.icon, self.lbl, self.sub, self.sw, self.val, self.chev):
+            if w is not None:
+                self.add_widget(w)
+        self.bind(pos=self._lay, size=self._lay)
+        self._lay()
+
+    def _lay(self, *a):
+        pad = self.PAD
+        cy = self.y + self.height / 2.0
+        right = (self.x + self.width) - pad
+        self.canvas.before.clear()
+        if self.icon is not None:
+            d = self.TILE
+            with self.canvas.before:
+                Color(ACCENT[0], ACCENT[1], ACCENT[2], 0.13)
+                RoundedRectangle(pos=(right - d, cy - d / 2.0), size=(d, d), radius=[dp(11)])
+            self.icon.center = (right - d / 2.0, cy)
+            right -= d + dp(13)
+        left = self.x + pad
+        if self.sw is not None:
+            self.sw.pos = (left, cy - self.sw.height / 2.0)
+            left += self.sw.width + dp(14)
+        elif self.val is not None:
+            self.chev.center = (left + dp(7), cy)
+            left += dp(22)
+            vw = min(dp(120), self.val.text_width() + dp(8))
+            self.val.pos = (left, self.y)
+            self.val.size = (vw, self.height)
+            left += vw + dp(10)
+        w = max(10, right - left)
+        if self.sub is not None:
+            self.lbl.pos = (left, cy + dp(1))
+            self.lbl.size = (w, dp(24))
+            self.sub.pos = (left, cy - dp(23))
+            self.sub.size = (w, dp(22))
+        else:
+            self.lbl.pos = (left, self.y)
+            self.lbl.size = (w, self.height)
+
+    def set_value(self, text):
+        if self.val is not None:
+            self.val.ltext = text
+            self._lay()
 
 
 class SheetButton(Widget):
@@ -2279,10 +2373,11 @@ class EmptyState(Widget):
 class Group(BoxLayout):
     """A rounded card holding rows that are separated by hairlines (settings)."""
 
-    def __init__(self, **kw):
+    def __init__(self, inset=(dp(20), dp(20)), **kw):
         kw.setdefault('orientation', 'vertical')
         kw.setdefault('size_hint', (1, None))
         super(Group, self).__init__(**kw)
+        self.inset = inset                      # (left, right) gap of the hairlines
         self.bind(minimum_height=self.setter('height'))
         self._rows = []
         with self.canvas.before:
@@ -2306,8 +2401,11 @@ class Group(BoxLayout):
         self._bg.size = self.size
         self.canvas.after.clear()
         with self.canvas.after:
+            Color(1, 1, 1, 0.055)                                   # hairline edge of the card
+            Line(rounded_rectangle=(self.x, self.y, self.width, self.height, dp(20)), width=1)
             Color(*DIVIDER)
             y = self.y + self.height
             for row in self._rows[:-1]:
                 y -= row.height
-                Rectangle(pos=(self.x + dp(20), y - 0.5), size=(max(0, self.width - dp(40)), 1))
+                Rectangle(pos=(self.x + self.inset[0], y - 0.5),
+                          size=(max(0, self.width - self.inset[0] - self.inset[1]), 1))

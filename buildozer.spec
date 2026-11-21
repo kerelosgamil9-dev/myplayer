@@ -21,7 +21,7 @@ android.presplash_color = #000000
 # Permissions: media read (API 33+ uses READ_MEDIA_VIDEO, older uses READ_EXTERNAL_STORAGE)
 android.permissions = READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE,READ_MEDIA_VIDEO,VIBRATE,WAKE_LOCK
 
-android.api = 33
+android.api = 35
 android.minapi = 24
 android.ndk = 25b
 android.ndk_api = 24
