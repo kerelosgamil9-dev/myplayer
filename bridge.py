@@ -756,7 +756,7 @@ def set_orientation(mode):
         _set_orientation_ui(mode)
 
 
-_INSETS = {'listener': None}
+_INSETS = {'listener': None, 'immersive': False}
 
 
 def _make_insets_listener():
@@ -771,6 +771,9 @@ def _make_insets_listener():
         @java_method('(Landroid/view/View;Landroid/view/WindowInsets;)Landroid/view/WindowInsets;')
         def onApplyWindowInsets(self, v, insets):
             try:
+                if _INSETS['immersive']:                 # full-screen video: no padding at all
+                    v.setPadding(0, 0, 0, 0)
+                    return insets
                 T = autoclass('android.view.WindowInsets$Type')
                 bars = insets.getInsets(T.systemBars() | T.displayCutout())
                 ime = insets.getInsets(T.ime())
@@ -817,8 +820,10 @@ def target_sdk():
 
 
 def setup_window_insets(bg_color=0xFF000000):
-    """Call once at start-up.  Only Android 15+ (API 35) forces edge-to-edge drawing."""
-    if ANDROID and sdk_int() >= 35:
+    """Call once at start-up.  Android only forces edge-to-edge drawing for apps that TARGET API 35+ and run
+    on Android 15+; for an app built for an older target the system already keeps content inside the
+    bars, so padding it again would draw black frames around everything."""
+    if ANDROID and sdk_int() >= 35 and target_sdk() >= 35:
         c = int(bg_color) & 0xFFFFFFFF
         if c > 0x7FFFFFFF:                           # Java ints are signed
             c -= 0x100000000
@@ -830,6 +835,12 @@ def _immersive_ui(on):
     try:
         act = _activity()
         win = act.getWindow()
+        _INSETS['immersive'] = bool(on)
+        if _INSETS['listener'] is not None:          # re-pad (or un-pad) right away
+            try:
+                act.findViewById(16908290).requestApplyInsets()
+            except Exception:
+                log(traceback.format_exc())
         if sdk_int() >= 30:
             try:
                 T = autoclass('android.view.WindowInsets$Type')
