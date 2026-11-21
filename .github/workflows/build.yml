@@ -47,9 +47,6 @@ jobs:
           API=$(grep -E '^android.api' buildozer.spec | head -1)
           echo "::notice title=spec::$API"
 
-      - name: Drop the cached dist (forces the manifest and gradle files to be regenerated for the current target API)
-        run: rm -rf .buildozer/android/platform/build-*/dists
-
       - name: Build debug APK
         run: buildozer -v android debug
 
