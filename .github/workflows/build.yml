@@ -81,14 +81,21 @@ jobs:
             echo "::warning title=APK target SDK::aapt or apk not found"
           fi
 
-      - name: Show the signing certificate of the built APK
-        if: always()
+      - name: Sign the APK with the fixed key (so a new APK installs over the old one)
         run: |
-          APK=$(ls bin/*.apk 2>/dev/null | head -1)
-          if [ -n "$APK" ]; then
-            F=$(unzip -p "$APK" 'META-INF/*.RSA' 'META-INF/*.DSA' 'META-INF/*.EC' 2>/dev/null | keytool -printcert 2>/dev/null | grep -E "SHA256:" | head -1)
-            echo "::warning title=APK signing certificate::$F"
+          APK=$(ls bin/*.apk | head -1)
+          BT=$(ls -d ~/.buildozer/android/platform/android-sdk/build-tools/*/ | sort -V | tail -1)
+          echo "apk: $APK   build-tools: $BT"
+          if [ ! -x "${BT}apksigner" ]; then
+            echo "::error title=signing::apksigner not found in $BT"
+            exit 1
           fi
+          "${BT}apksigner" sign --ks debug.keystore --ks-key-alias androiddebugkey \
+            --ks-pass pass:android --key-pass pass:android --out signed.apk "$APK"
+          mv signed.apk "$APK"
+          "${BT}apksigner" verify --verbose --print-certs "$APK" | head -12
+          D=$("${BT}apksigner" verify --print-certs "$APK" | grep -m1 "certificate SHA-256 digest")
+          echo "::warning title=APK signing certificate::$D (expected b2574ecd...)"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
