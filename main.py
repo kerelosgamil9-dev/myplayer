@@ -1,248 +1,335 @@
 # -*- coding: utf-8 -*-
 """
-Pro Player - a video player with Arabic UI, device-album playlists, manual
-ordering by drag, hold-to-speed-up and many player features.
+Lingora - English learning app (pure Kivy + SQLite).
 
-Run on PC for a quick look:   PROPLAYER_DIR=/path/with/videos python main.py
+Entry point: creates the window, the navigation drawer and the screens.
+Run it with:  python main.py   (or open it in Pydroid 3 and press play)
 """
+
 import os
 import sys
-import traceback
 
-os.environ.setdefault('KIVY_NO_ARGS', '1')
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
 
-from kivy.config import Config                                   # noqa: E402
+from kivy.config import Config                                    # noqa: E402
+from kivy.utils import platform                                    # noqa: E402
 
 Config.set('kivy', 'exit_on_escape', '0')
-Config.set('input', 'mouse', 'mouse,multitouch_on_demand')
+if platform in ('linux', 'win', 'macosx'):
+    # phone-shaped window when testing on a computer
+    Config.set('graphics', 'width', os.environ.get('LINGORA_W', '400'))
+    Config.set('graphics', 'height', os.environ.get('LINGORA_H', '780'))
+    Config.set('graphics', 'resizable', '1')
 
-from kivy.app import App                                          # noqa: E402
-from kivy.clock import Clock                                      # noqa: E402
-from kivy.core.window import Window                               # noqa: E402
-
-HERE = os.path.dirname(os.path.abspath(__file__))
-if HERE not in sys.path:
-    sys.path.insert(0, HERE)
-
-IMPORT_ERROR = None
-try:
-    import bridge                                                 # noqa: E402
-    import core                                                   # noqa: E402
-    import widgets                                                # noqa: E402
-    from screens import CollectionPage, GroupPage, HomePage, PickerPage, Root   # noqa: E402
-except Exception:
-    IMPORT_ERROR = traceback.format_exc()
-    core = None
+from kivy.app import App                                           # noqa: E402
+from kivy.clock import Clock                                       # noqa: E402
+from kivy.core.text import LabelBase                               # noqa: E402
+from kivy.core.window import Window                                # noqa: E402
+from kivy.metrics import dp, sp                                    # noqa: E402
+from kivy.uix.boxlayout import BoxLayout                           # noqa: E402
+from kivy.uix.floatlayout import FloatLayout                       # noqa: E402
+from kivy.uix.modalview import ModalView                           # noqa: E402
+from kivy.uix.screenmanager import FadeTransition, ScreenManager   # noqa: E402
+from kivy.uix.widget import Widget                                 # noqa: E402
+from kivy.graphics import Color, RoundedRectangle                  # noqa: E402
 
 
-def error_view(text):
-    """Plain Kivy widgets only: shows a traceback on screen so it can be photographed."""
-    from kivy.uix.boxlayout import BoxLayout
-    from kivy.uix.button import Button
-    from kivy.uix.label import Label
-    from kivy.uix.scrollview import ScrollView
-    box = BoxLayout(orientation='vertical', padding=10, spacing=10)
-    sv = ScrollView(size_hint=(1, 1))
-    lab = Label(text=text, size_hint_y=None, halign='left', valign='top', font_size='12sp',
-                text_size=(Window.width - 30, None), color=(1, 0.8, 0.8, 1))
-    lab.bind(texture_size=lambda inst, val: setattr(inst, 'height', val[1] + 20))
-    sv.add_widget(lab)
-    box.add_widget(sv)
-    btn = Button(text='Close', size_hint=(1, None), height=90)
-    box.add_widget(btn)
-    return box, btn
+# ----------------------------------------------------------------------
+# fonts: Roboto (Kivy default) has no Arabic glyphs, so the default font is
+# replaced by a font that has Latin + Arabic (bundled DejaVu Sans, or one of
+# the Android system Arabic fonts as a fallback).
+# ----------------------------------------------------------------------
+def setup_fonts():
+    fonts = os.path.join(BASE_DIR, 'fonts')
+    regular = [os.path.join(fonts, 'DejaVuSans.ttf'),
+               os.path.join(BASE_DIR, 'DejaVuSans.ttf'),      # font next to main.py
+               '/system/fonts/NotoNaskhArabic-Regular.ttf',
+               '/system/fonts/NotoSansArabic-Regular.ttf',
+               '/system/fonts/DroidSansArabic.ttf',
+               '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf']
+    bold = [os.path.join(fonts, 'DejaVuSans-Bold.ttf'),
+            os.path.join(BASE_DIR, 'DejaVuSans-Bold.ttf'),
+            '/system/fonts/NotoNaskhArabic-Bold.ttf',
+            '/system/fonts/NotoSansArabic-Bold.ttf',
+            '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf']
+    reg = next((p for p in regular if os.path.exists(p)), None)
+    bld = next((p for p in bold if os.path.exists(p)), None) or reg
+    if reg:
+        LabelBase.register(name='Roboto', fn_regular=reg, fn_bold=bld)
+    else:
+        print('[Lingora] WARNING: no Arabic-capable font found. '
+              'Put DejaVuSans.ttf (and -Bold) next to main.py or in a "fonts" folder.')
 
 
-class ProPlayerApp(App):
-    title = 'Pro Player'
+setup_fonts()
 
+import rtl                                                         # noqa: E402
+import strings                                                     # noqa: E402
+from database import Database                                      # noqa: E402
+from screens import (ChallengesScreen, FolderScreen,   # noqa: E402
+                     FoldersScreen, GameScreen, HomeScreen, level_cfg,
+                     LevelsScreen, SettingsScreen, folder_game_dialog,
+                     source_dialog)
+from services import (SoundFX, Storage, TTS, request_storage_permissions,  # noqa: E402
+                      find_asset, install_keyboard_probe, set_system_bars, system_is_dark)
+from strings import tr                                             # noqa: E402
+from theme import C, THEME, alpha                                  # noqa: E402
+import widgets as widgets_mod                                      # noqa: E402
+from widgets import (ALabel, DrawerItem, FlameWidget, NavDrawer, Toast,  # noqa: E402
+                     TopBar, add_row, hbox, logo_image, spacer)
+
+_LOGO = find_asset('logo.png')
+if _LOGO:
+    try:
+        Window.set_icon(_LOGO)              # desktop window icon (Android uses the APK icon)
+    except Exception:                       # noqa: BLE001
+        pass
+
+ROOTS = ('home', 'folders', 'levels', 'challenges', 'settings')
+NAV = [('home', 'home', 'nav_home'),
+       ('folders', 'folder', 'nav_folders'),
+       ('levels', 'levels', 'nav_levels'),
+       ('challenges', 'bolt', 'nav_challenges'),
+       ('settings', 'gear', 'nav_settings')]
+
+
+class LingoraApp(App):
+    title = 'Lingora'
+
+    # ------------------------------------------------------------------
+    # life cycle
+    # ------------------------------------------------------------------
     def build(self):
         try:
-            if IMPORT_ERROR:
-                raise RuntimeError(IMPORT_ERROR)
-            return self._build()
-        except Exception:
-            tb = traceback.format_exc()
-            Window.clearcolor = (0.1, 0, 0, 1)
-            view, btn = error_view('STARTUP ERROR\n\n' + tb)
-            btn.bind(on_release=lambda *a: self.stop())
-            return view
+            self.user_dir = self.user_data_dir
+            os.makedirs(self.user_dir, exist_ok=True)
+        except Exception:                                           # noqa: BLE001
+            self.user_dir = os.path.join(BASE_DIR, 'data')
+            os.makedirs(self.user_dir, exist_ok=True)
+        self.db = Database(os.path.join(self.user_dir, 'lingora.db'))
+        self.sfx = SoundFX(os.path.join(self.user_dir, 'sfx'))
+        self.tts = TTS()
+        self.storage = Storage(self.user_dir)
+        self.game_cfg = None
+        self.current_folder_id = None
+        self.history = []
+        self.current = 'home'
+        self.section = 'home'
+        self._last_back = 0
+        self._tts_warned = False
+        self._theme_mode_at_build = None
 
-    def _install_error_overlay(self):
-        from kivy.base import ExceptionHandler, ExceptionManager
-        app = self
+        widgets_mod.VK['mode'] = self.db.get('kb_mode') or 'auto'
+        install_keyboard_probe(widgets_mod.vk_fallback)
+        Window.bind(on_keyboard=self.on_key)
 
-        class Handler(ExceptionHandler):
-            def handle_exception(self, inst):
-                try:
-                    app.show_error(traceback.format_exc())
-                except Exception:
-                    pass
-                return ExceptionManager.PASS
-        ExceptionManager.add_handler(Handler())
+        self.root_widget = FloatLayout()
+        self.apply_settings()
+        self.build_ui('home')
+        return self.root_widget
 
-    def show_error(self, tb):
-        if getattr(self, '_err_view', None) is not None:
-            return
-        view, btn = error_view('ERROR (the app is still running)\n\n' + tb)
-        self._err_view = view
-        Window.add_widget(view)
-
-        def close(*a):
-            Window.remove_widget(view)
-            self._err_view = None
-        btn.bind(on_release=close)
-
-    def _build(self):
-        self._err_view = None
-        self._install_error_overlay()
-        widgets.register_fonts()
-        Window.clearcolor = (0, 0, 0, 1)
-        bridge.setup_window_insets(widgets.BG_INT)
-        self.store = core.Store(os.path.join(bridge.data_dir(self), 'library.json'), background=True)
-        self.lib = core.Library(self.store)
-        self.thumbs = bridge.ThumbService(self)
-        self.loaded = False
-        self.permitted = False
-        self.prev_crash = bridge.init_crumbs(self)
-        bridge.install_crash_logger()
-        self.root = Root(self)
-        self.home = HomePage(self)
-        self.root.push(self.home)
-        Window.bind(on_keyboard=self._on_keyboard)
-        Clock.schedule_once(lambda dt: self.start_up(), 0.2)
-        if self.prev_crash:
-            Clock.schedule_once(lambda dt: self.show_error(
-                'PREVIOUS RUN ENDED ABRUPTLY. Last steps:\n\n' + self.prev_crash), 1.0)
-        Clock.schedule_interval(lambda dt: self.store.save(), 20)
-        Clock.schedule_once(self._check_thumbs, 15)
-        Clock.schedule_once(self._tune_runtime, 1.0)
-        return self.root
-
-    def _tune_runtime(self, dt):
-        """Fewer pauses while scrolling: everything built at startup is excluded from the garbage
-        collector's scans, and it runs much less often; pictures are uploaded one per frame."""
-        import gc
-        try:
-            gc.collect()
-            gc.freeze()
-            gc.set_threshold(40000, 20, 20)
-        except Exception:
-            pass
-        try:
-            from kivy.loader import Loader
-            Loader.max_upload_per_frame = 1
-        except Exception:
-            pass
-
-    def _check_thumbs(self, dt):
-        t = getattr(self, 'thumbs', None)
-        if t and t.failed and bridge.LAST_THUMB_ERROR[0] and \
-                not any(f.endswith('.jpg') for f in os.listdir(bridge.cache_dir(self))):
-            self.show_error('THUMBNAILS FAILED:\n\n' + bridge.LAST_THUMB_ERROR[0])
-
-    # ---- startup / scanning ------------------------------------------------------
-    def start_up(self):
-        bridge.request_permissions(self._perm_result)
-
-    def _perm_result(self, ok):
-        self.permitted = ok
-        if not ok:
-            self.loaded = True
-            self.home.rebuild()
-            self.root.say('يلزم السماح بالوصول إلى الفيديوهات')
-            return
-        self.rescan()
-
-    def rescan(self, manual=False):
-        if not bridge.has_permissions():
-            bridge.request_permissions(self._perm_result)
-            return
-
-        def done(videos):
-            self.lib.set_catalog(videos)
-            self.loaded = True
-            self.permitted = True
-            self.root.refresh_pages()
-            if manual:
-                self.root.say('تم العثور على %d فيديو' % len(videos))
-        bridge.scan_videos_async(done)
-
-    # ---- helpers used by pages -------------------------------------------------------
-    def thumb(self, key, callback):
-        v = self.lib.videos.get(key)
-        if v is None:
-            return None
-        return self.thumbs.get(v, callback)
-
-    _prefetching = 0
-
-    def prefetch_thumb(self, key):
-        """Decode a thumbnail that is about to scroll into view (only when its file already exists), so
-        that it is ready when the row arrives."""
-        v = self.lib.videos.get(key)
-        if v is None or self._prefetching >= 6:
-            return
-        path = bridge.thumb_path(self, v)
-        if path in widgets._tex_cache or not os.path.exists(path):
-            return
-        self._prefetching += 1
-
-        def done(tex):
-            self._prefetching = max(0, self._prefetching - 1)
-        widgets.load_texture_async(path, done)
-
-    def open_collection(self, cid):
-        self.root.push(CollectionPage(self, cid))
-
-    def open_group(self, gid):
-        self.root.push(GroupPage(self, gid))
-
-    def open_picker(self, cid, new_name=None):
-        self.root.push(PickerPage(self, cid, new_name=new_name))
-
-    def play(self, keys, index, cid=None):
-        from player import PlayerPage          # imported lazily: needs ffpyplayer
-        if not keys:
-            return
-        self.root.push(PlayerPage(self, keys, index, cid))
-
-    # ---- android keys / lifecycle -----------------------------------------------------
-    def _on_keyboard(self, window, key, scancode=None, codepoint=None, modifier=None, **kw):
-        if key == 27:
-            return self.root.back()
-        return False
-
-    def _player(self):
-        page = self.root.pages[-1] if self.root.pages else None
-        return page if hasattr(page, 'on_app_pause') else None
+    def on_start(self):
+        request_storage_permissions()
+        Clock.schedule_once(lambda dt: self.sfx.load(), 1.0)
 
     def on_pause(self):
-        p = self._player()
-        if p:
-            p.on_app_pause()
-        self.store.save(force=True)
-        bridge.crumb('paused')
         return True
 
     def on_resume(self):
-        bridge.crumb('resumed')
-        p = self._player()
-        if p:
-            p.on_app_resume()
-        else:
-            self.rescan()
+        # follow the phone's night mode when the theme is "auto"
+        if self.db.get('theme') == 'auto':
+            mode = 'dark' if system_is_dark() else 'light'
+            if mode != self._theme_mode_at_build:
+                self.rebuild(self.current if self.current in ROOTS else 'home')
 
     def on_stop(self):
         try:
-            p = self._player()
-            if p:
-                p.on_close()
-            self.store.save(force=True)
-            bridge.crumb('clean-exit')
-        except Exception:
-            traceback.print_exc()
+            self.tts.stop()
+            self.db.close()
+        except Exception:                                           # noqa: BLE001
+            pass
+
+    # ------------------------------------------------------------------
+    # settings -> runtime state
+    # ------------------------------------------------------------------
+    def apply_settings(self):
+        db = self.db
+        self.lang = db.get('lang') if db.get('lang') in ('ar', 'en') else 'ar'
+        strings.set_lang(self.lang)
+        rtl.UI_RTL = self.lang == 'ar'
+        rtl.ENABLED = True                  # Arabic shaping / bidi is always on
+        pref = db.get('theme')
+        if pref == 'auto':
+            mode = 'dark' if system_is_dark() else 'light'
+        else:
+            mode = pref if pref in ('dark', 'light') else 'dark'
+        THEME.set_mode(mode)
+        self._theme_mode_at_build = mode
+        Window.clearcolor = C('bg')
+        self.sfx.enabled = db.get_bool('sound')
+        Clock.schedule_once(lambda dt: set_system_bars(C('topbar'), C('bg'), mode == 'light'), 0.2)
+
+    def rebuild(self, goto='home'):
+        """Re-create the whole UI (theme / language changed)."""
+        for w in list(Window.children):
+            if isinstance(w, ModalView):
+                try:
+                    w.dismiss(animation=False)
+                except Exception:                                   # noqa: BLE001
+                    pass
+        self.apply_settings()
+        self.build_ui(goto)
+
+    # ------------------------------------------------------------------
+    # UI skeleton
+    # ------------------------------------------------------------------
+    def build_ui(self, start):
+        self.root_widget.clear_widgets()
+        main = BoxLayout(orientation='vertical')
+        self.topbar = TopBar(on_menu=lambda: self.drawer.toggle(), on_back=self.go_back)
+        self.sm = ScreenManager(transition=FadeTransition(duration=0.12))
+        self.screens = {
+            'home': HomeScreen(self, name='home'),
+            'folders': FoldersScreen(self, name='folders'),
+            'folder': FolderScreen(self, name='folder'),
+            'levels': LevelsScreen(self, name='levels'),
+            'challenges': ChallengesScreen(self, name='challenges'),
+            'game': GameScreen(self, name='game'),
+            'settings': SettingsScreen(self, name='settings'),
+        }
+        for s in self.screens.values():
+            self.sm.add_widget(s)
+        main.add_widget(self.topbar)
+        main.add_widget(self.sm)
+        self.drawer = NavDrawer()
+        self.root_widget.add_widget(main)
+        self.root_widget.add_widget(self.drawer)
+        self.history = []
+        self.section = start if start in ROOTS else 'home'
+        self.current = start
+        self.sm.current = start
+        self.screens[start].on_pre_enter()
+        self.refresh_drawer()
+
+    def apply_topbar(self, screen):
+        spec = screen.topbar_spec()
+        title, mode, actions = spec[:3]
+        extra = spec[3] if len(spec) > 3 else {}
+        self.topbar.set(title, mode, actions, **extra)
+
+    def refresh_drawer(self):
+        p = self.drawer.panel
+        p.clear_widgets()
+        db = self.db
+        streak = db.get_streak()
+        head = hbox(dp(64), spacing=dp(12))
+        col = BoxLayout(orientation='vertical', spacing=dp(2))
+        col.add_widget(ALabel(raw='Lingora', font_size=sp(24), bold=True, color=C('text'),
+                              align='left' if not rtl.UI_RTL else 'right'))
+        col.add_widget(ALabel(raw=tr('tagline'), font_size=sp(12), color=C('sub'),
+                              align='left' if not rtl.UI_RTL else 'right'))
+        add_row(head, [logo_image(dp(56)), col])
+        p.add_widget(head)
+        pill = hbox(dp(54), spacing=dp(10), padding=[dp(12), dp(4)])
+        with pill.canvas.before:
+            Color(*alpha(C('accent'), 0.13))
+            pr = RoundedRectangle(pos=pill.pos, size=pill.size, radius=[dp(16)])
+        pill.bind(pos=lambda w, v: setattr(pr, 'pos', v), size=lambda w, v: setattr(pr, 'size', v))
+        flame = FlameWidget(days=streak, size_hint=(None, 1), width=dp(34))
+        add_row(pill, [flame, ALabel(raw=tr('streak_days', n=streak), font_size=sp(15), bold=True,
+                                     color=C('text'))])
+        p.add_widget(pill)
+        p.add_widget(spacer(h=dp(10)))
+        for name, icon, key in NAV:
+            item = DrawerItem(icon, tr(key), active=(name == self.section))
+            item.bind(on_release=lambda inst, n=name: self._nav(n))
+            p.add_widget(item)
+        p.add_widget(Widget())
+        p.add_widget(ALabel(raw=tr('drawer_footer'), font_size=sp(12), color=C('sub'),
+                            size_hint_y=None, height=dp(24), align='center'))
+
+    # ------------------------------------------------------------------
+    # navigation
+    # ------------------------------------------------------------------
+    def _nav(self, name):
+        self.drawer.close()
+        self.go(name)
+
+    def go(self, name, push=False):
+        if name in ROOTS:
+            self.history = []
+            self.section = name
+        elif push:
+            self.history.append(self.current)
+        self._show(name)
+
+    def _show(self, name):
+        self.current = name
+        screen = self.screens[name]
+        if self.sm.current == name:
+            screen.on_pre_enter()
+        else:
+            self.sm.current = name
+        self.refresh_drawer()
+
+    def go_back(self):
+        if self.history:
+            self._show(self.history.pop())
+        elif self.current != 'home':
+            self.go('home')
+
+    def on_key(self, window, key, *args):
+        if key != 27:                       # Android back button / Esc
+            return False
+        if widgets_mod.vk_hide():           # close the typing keyboard first
+            return True
+        if self.drawer.is_open:
+            self.drawer.close()
+            return True
+        if self.history or self.current != 'home':
+            self.go_back()
+            return True
+        import time
+        now = time.time()
+        if now - self._last_back < 2.0:
+            self.stop()
+            return True
+        self._last_back = now
+        Toast.show(tr('press_again_exit'), 'info', 1.6)
+        return True
+
+    # ------------------------------------------------------------------
+    # actions used by the screens
+    # ------------------------------------------------------------------
+    def open_folder(self, folder_id):
+        self.current_folder_id = folder_id
+        self.go('folder', push=True)
+
+    def open_level(self, n):
+        self.start_game(level_cfg(n))
+
+    def start_game(self, cfg):
+        self.game_cfg = dict(cfg)
+        if self.current == 'game':
+            self.screens['game'].launch()
+        else:
+            self.go('game', push=True)
+
+    def pick_source(self, mode, base=None):
+        source_dialog(self, mode, base)
+
+    def pick_game_for_folder(self, folder_id):
+        folder_game_dialog(self, folder_id)
+
+    def speak(self, text, quiet=False):
+        ok = self.tts.speak(text)
+        if not ok and not (quiet and self._tts_warned):
+            self._tts_warned = True
+            Toast.show(tr('tts_unavailable'), 'warn', 3)
+        return ok
 
 
 if __name__ == '__main__':
-    ProPlayerApp().run()
+    LingoraApp().run()

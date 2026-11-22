@@ -1,2233 +1,1242 @@
 # -*- coding: utf-8 -*-
 """
-screens.py - navigation root, rows, home page (playlists / folders / videos /
-history / me), collection page and the video picker.
+screens.py - every screen of Lingora and the dialogs they use.
+
+  HomeScreen        dashboard, streak fire, daily goal, quick actions
+  FoldersScreen     list of word folders
+  FolderScreen      items of one folder (separators, highlighter, TTS)
+  LevelsScreen      built-in progressive levels and level tests
+  ChallengesScreen  games and challenges
+  GameScreen        hosts the running game and its result
+  SettingsScreen    themes, language, dividers, backup, ...
 """
+
+import os
 import time
 
 from kivy.clock import Clock
-from kivy.graphics import Color, Ellipse, Line, Rectangle, RoundedRectangle, Triangle
+from kivy.core.window import Window
+from kivy.graphics import Color, Rectangle, RoundedRectangle
 from kivy.metrics import dp, sp
 from kivy.uix.boxlayout import BoxLayout
-from kivy.uix.floatlayout import FloatLayout
+from kivy.uix.gridlayout import GridLayout
+from kivy.uix.screenmanager import Screen
+from kivy.uix.scrollview import ScrollView
 from kivy.uix.widget import Widget
 
-import bridge
-import core
-import textfix
-from widgets import (ACCENT, ACCENT_SOFT, BG, DANGER, DIVIDER, SUB, SURFACE, SURFACE2, TEXT,
-                     ChipsRow, Dialog, EmptyState, FieldInput, Group, Icon, IconButton, MenuSheet,
-                     PromptDialog, Row, SettingRow, SheetButton, SheetLabel, SheetRow, SheetTitle, PillSwitch, Thumb, Tag, Toast, Txt, VList, make_scroll)
+import data_bank
+import games
+import rtl
+from database import PASS_SCORE
+from strings import tr
+from theme import C, FOLDER_COLORS, HIGHLIGHTS, alpha
+import widgets as widgets_mod                                      # noqa: E402
+from widgets import (TintButton, ALabel, ATextInput, BarProgress, Card, ColorDots, Dialog, Divider,
+                     FlameWidget, FormField, Icon, IconButton, RButton, Segmented, TapCard,
+                     Toast, Toggle, WeekStrip, add_row, auto_card, button, confirm, hbox, label,
+                     logo_image, spacer, vbox)
 
 
-# ---------------------------------------------------------------------------
-# root / pages
-# ---------------------------------------------------------------------------
-class Page(FloatLayout):
-    """Full screen page with an opaque background."""
-    BGCOLOR = BG
+# ======================================================================
+# helpers
+# ======================================================================
+def make_divider(app):
+    """Divider drawn between list items according to the Settings."""
+    db = app.db
+    if not db.get_bool('show_dividers'):
+        return spacer(h=dp(8))
+    col = C('primary') if db.get('divider_color') == 'accent' else C('divider')
+    return Divider(style=db.get('divider_style'), thickness=db.get_int('divider_width', 1),
+                   color=col)
+
+
+class Badge(ALabel):
+    """Rounded coloured square with a short text (level number, ...)."""
+
+    def __init__(self, bg, **kw):
+        kw.setdefault('align', 'center')
+        kw.setdefault('bold', True)
+        kw.setdefault('size_hint', (None, None))
+        kw.setdefault('size', (dp(46), dp(46)))
+        super().__init__(**kw)
+        with self.canvas.before:
+            Color(*bg)
+            self._r = RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(14)])
+        self.bind(pos=self._u, size=self._u)
+
+    def _u(self, *a):
+        self._r.pos = self.pos
+        self._r.size = self.size
+
+
+def centered(widget, size):
+    """Wrap a fixed-size widget so it stays vertically centred in a row."""
+    box = BoxLayout(orientation='vertical', size_hint=(None, 1), width=size[0])
+    box.add_widget(Widget())
+    widget.size_hint = (None, None)
+    widget.size = size
+    box.add_widget(widget)
+    box.add_widget(Widget())
+    return box
+
+
+def switch_row(text, active, on_change, sub=''):
+    """Label (+ optional description) with a Toggle on the other side."""
+    row = BoxLayout(orientation='horizontal', size_hint_y=None, spacing=dp(12))
+    row.bind(minimum_height=row.setter('height'))
+    col = vbox(spacing=dp(2))
+    col.add_widget(label(text, size=16, bold=True))
+    if sub:
+        col.add_widget(label(sub, size=13, color='sub'))
+    t = Toggle(active=active)
+    t.bind(active=lambda inst, v: on_change(v))
+    holder = BoxLayout(orientation='vertical', size_hint=(None, None), width=dp(52), height=dp(48))
+    holder.add_widget(Widget())
+    holder.add_widget(t)
+    holder.add_widget(Widget())
+    add_row(row, [col, holder])
+    return row
+
+
+def section_title(text):
+    return label(text, size=13, color='sub', bold=True, padding=[dp(4), 0])
+
+
+def chips(options, value, on_change, cols=3, size=14):
+    """Grid of exclusive chips (like Segmented but wrapping onto several rows)."""
+    rows = (len(options) + cols - 1) // cols
+    grid = GridLayout(cols=cols, spacing=dp(6), size_hint_y=None, height=rows * dp(42) + (rows - 1) * dp(6))
+    btns = {}
+
+    def paint():
+        for v, b in btns.items():
+            b.bg = C('primary') if v == state['v'] else C('card2')
+            b.color = C('on_primary') if v == state['v'] else C('sub')
+
+    state = {'v': value}
+
+    def pick(v):
+        state['v'] = v
+        paint()
+        on_change(v)
+
+    opts = list(options)
+    if rtl.UI_RTL:
+        # keep the visual reading order right-to-left inside every row
+        padded = opts + [None] * (rows * cols - len(opts))
+        opts = []
+        for r in range(rows):
+            opts += list(reversed(padded[r * cols:(r + 1) * cols]))
+    for opt in opts:
+        if opt is None:
+            grid.add_widget(Widget())
+            continue
+        v, text = opt
+        b = RButton(raw=text, font_size=sp(size), radius=dp(12), size_hint_y=None, height=dp(42))
+        b.bind(on_release=lambda inst, v=v: pick(v))
+        btns[v] = b
+        grid.add_widget(b)
+    paint()
+    return grid
+
+
+# ======================================================================
+# base screen
+# ======================================================================
+class BaseScreen(Screen):
+    scrolling = True
 
     def __init__(self, app, **kw):
-        kw.setdefault('size_hint', (1, 1))
-        super(Page, self).__init__(**kw)
+        super().__init__(**kw)
         self.app = app
         with self.canvas.before:
-            Color(*self.BGCOLOR)
-            self._bg = Rectangle(pos=self.pos, size=self.size)
-        self.bind(pos=self._bg_geo, size=self._bg_geo)
+            self._bgc = Color(*C('bg'))
+            self._bgr = Rectangle(pos=self.pos, size=self.size)
+        self.bind(pos=self._upd_bg, size=self._upd_bg)
+        if self.scrolling:
+            self.sv = ScrollView(do_scroll_x=False, bar_width=dp(3),
+                                 bar_color=alpha(C('sub'), 0.5))
+            self.col = vbox(spacing=dp(12), padding=[dp(14), dp(14), dp(14), dp(30)])
+            self.sv.add_widget(self.col)
+            self.add_widget(self.sv)
 
-    def _bg_geo(self, *a):
-        self._bg.pos = self.pos
-        self._bg.size = self.size
+    def _upd_bg(self, *a):
+        self._bgr.pos = self.pos
+        self._bgr.size = self.size
 
-    def on_touch_down(self, touch):
-        FloatLayout.on_touch_down(self, touch)
-        return True          # pages are opaque: nothing below may react
+    def topbar_spec(self):
+        return ('', 'menu', [])
 
-    def on_touch_move(self, touch):
-        FloatLayout.on_touch_move(self, touch)
-        return True
-
-    def on_touch_up(self, touch):
-        FloatLayout.on_touch_up(self, touch)
-        return True
-
-    def on_back(self):
-        return False
-
-    def on_show(self):
-        pass
-
-    def on_close(self):
-        pass
-
-    def refresh(self):
-        pass
-
-    def on_resume(self):
-        """Back on top again because the page above it closed."""
+    def on_pre_enter(self, *a):
         self.refresh()
-        self.on_show()
-
-
-class Root(FloatLayout):
-    def __init__(self, app, **kw):
-        super(Root, self).__init__(**kw)
-        self.app = app
-        self.pages = []
-        self.overlays = []
-        self._covered = []           # (page, [pages taken out of the tree while it is on top])
-        self.toast = Toast()
-        self.add_widget(self.toast)
-        self._guard_until = 0.0
-        self._eaten = set()
-
-    def guard_touches(self, touch=None, sec=0.7):
-        """A sheet was just closed by a press outside it: the rest of that touch is ignored, and so is
-        every new press for a moment, so the tap (or an echo of it) can never open what lies under it."""
-        if touch is not None:
-            self._eaten.add(touch.uid)
-        self._guard_until = time.time() + sec
-
-    def on_touch_down(self, touch):
-        if time.time() < self._guard_until:
-            self._eaten.add(touch.uid)
-            return True
-        return FloatLayout.on_touch_down(self, touch)
-
-    def on_touch_move(self, touch):
-        if touch.uid in self._eaten:
-            return True
-        return FloatLayout.on_touch_move(self, touch)
-
-    def on_touch_up(self, touch):
-        if touch.uid in self._eaten:
-            self._eaten.discard(touch.uid)
-            return True
-        return FloatLayout.on_touch_up(self, touch)
-
-    def _raise_layers(self):
-        for ov in self.overlays:
-            self.remove_widget(ov)
-            self.add_widget(ov)
-        self.remove_widget(self.toast)
-        self.add_widget(self.toast)
-
-    def push(self, page):
-        self.pages.append(page)
-        self.add_widget(page)
-        self.suspend_below(page)
-        self._raise_layers()
-        page.on_show()
-
-    def suspend_below(self, page):
-        """Pages are full screen and opaque, so whatever is under the top page is invisible.  Kivy
-        draws every widget in the tree on every frame, hidden or not, which doubles the work of
-        scrolling a list; the pages below are therefore taken out of the tree while a page is on
-        top of them (and put back, in order, when it closes)."""
-        if page not in self.pages:
-            return
-        below = []
-        for p in self.pages:
-            if p is page:
-                break
-            if p.parent is self:
-                below.append(p)
-        if not below:
-            return
-        for p in below:
-            self.remove_widget(p)
-        self._covered.append((page, below))
-
-    def _uncover(self, page):
-        for k in range(len(self._covered) - 1, -1, -1):
-            owner, pages = self._covered[k]
-            if owner is not page:
-                continue
-            del self._covered[k]
-            for p in reversed(pages):        # the top-most first; each one goes to the very bottom
-                if p.parent is None and p in self.pages:
-                    self.add_widget(p, index=len(self.children))
-
-    def pop(self):
-        if len(self.pages) <= 1:
-            return False
-        page = self.pages.pop()
-        try:
-            page.on_close()
-        finally:
-            self.remove_widget(page)
-            self._uncover(page)
-        if self.pages:
-            self.pages[-1].on_resume()
-        return True
-
-    def show_overlay(self, ov):
-        if ov in self.overlays:
-            return
-        self.overlays.append(ov)
-        self.add_widget(ov)
-        self._raise_layers()
-
-    def dismiss_overlay(self, ov):
-        if ov in self.overlays:
-            self.overlays.remove(ov)
-            self.remove_widget(ov)
-
-    def back(self):
-        """Android back button. Returns True when handled."""
-        if self.overlays:
-            self.overlays[-1].on_back()
-            return True
-        if self.pages and self.pages[-1].on_back():
-            return True
-        if len(self.pages) > 1:
-            self.pop()
-            return True
-        return False
-
-    def say(self, text):
-        self.toast.show(text, self.size)
-
-    def refresh_pages(self):
-        for p in self.pages:
-            p.refresh()
-
-
-# ---------------------------------------------------------------------------
-# shared context for rows
-# ---------------------------------------------------------------------------
-class Ctx(object):
-    def __init__(self, app):
-        self.app = app
-        self.sel_mode = False
-        self.selected = set()
-        self.reorder = False
-        self.show_path = False
-
-    @property
-    def lib(self):
-        return self.app.lib
-
-
-def _draw_check(canvas, cx, cy, r, selected):
-    with canvas:
-        if selected:
-            Color(*ACCENT)
-            Ellipse(pos=(cx - r, cy - r), size=(2 * r, 2 * r))
-            Color(0, 0, 0, 1)
-            Line(points=[cx - r * 0.45, cy, cx - r * 0.1, cy - r * 0.38, cx + r * 0.5, cy + r * 0.42],
-                 width=dp(1.8), cap='round', joint='round')
-        else:
-            Color(1, 1, 1, 0.5)
-            Line(circle=(cx, cy, r), width=dp(1.4))
-
-
-class ListRow(Row):
-    """Common behaviour: selection background + check circle + drag handle."""
-
-    def __init__(self, **kw):
-        super(ListRow, self).__init__(**kw)
-        self.handle = Icon(name='drag', color=[1, 1, 1, 0.55], size=(dp(24), dp(24)))
-        self.add_widget(self.handle)
-        self._thumb_key = None
-
-    def is_selected(self):
-        return bool(self.ctx and self.item and self.ctx.sel_mode and self._sel_id() in self.ctx.selected)
-
-    def _sel_id(self):
-        return None
-
-    def hit_handle(self, x):
-        return bool(self.ctx and self.ctx.sel_mode and self.ctx.reorder and x < self.x + dp(100))
-
-    def left_bound(self):
-        if self.ctx and self.ctx.sel_mode:
-            return self.x + (dp(100) if self.ctx.reorder else dp(54))
-        return self.x + dp(16)
-
-    @staticmethod
-    def fit_title(label, w, steps):
-        """Give a title the first (font size, lines) step in which the WHOLE name fits; when none does, the
-        last (smallest) step is kept.  Lets the user read the full name of a row while ordering by hand."""
-        txt = ' '.join((label.ltext or '').split())
-        label.width = w
-        for fs, n in steps:
-            label.font_size = sp(fs)
-            label.nlines = n
-            lines = label.logical_lines()
-            if len(lines) <= n and ' '.join(lines) == txt:
-                return
-
-    def draw_selection(self):
-        self.canvas.before.clear()
-        ctx = self.ctx
-        if not ctx or not ctx.sel_mode:
-            self.handle.opacity = 0
-            return
-        sel = self.is_selected()
-        with self.canvas.before:
-            if sel:
-                Color(ACCENT[0], ACCENT[1], ACCENT[2], 0.13)
-                Rectangle(pos=self.pos, size=self.size)
-        _draw_check(self.canvas.before, self.x + dp(30), (self.y + self.height / 2.0), dp(11), sel)
-        if ctx.reorder:
-            self.handle.opacity = 1
-            self.handle.center = (self.x + dp(72), (self.y + self.height / 2.0))
-        else:
-            self.handle.opacity = 0
-
-    def set_thumb_for(self, thumb, key):
-        self._thumb_key = key
-        app = self.ctx.app
-        if key is None:
-            thumb.set_source(None)
-            return
-
-        def got(path, k=key):
-            if self._thumb_key == k and self.item is not None:
-                thumb.set_source(path)
-        thumb.set_source(app.thumb(key, got))
-
-
-class VideoRow(ListRow):
-    kind = 'video'
-    STEPS = [(15.5, 2)]
-    STEPS_SEL = [(15.5, 2), (14, 3), (13, 3), (12, 3), (11.5, 4)]
-
-    def __init__(self, **kw):
-        super(VideoRow, self).__init__(**kw)
-        self.thumb = Thumb(radius=dp(12), size=(dp(128), dp(72)))
-        self.title = Txt(font_size=sp(15.5), nlines=2, valign='top', size_hint=(None, None))
-        self.info = Txt(font_size=sp(12.5), color=SUB, valign='top', size_hint=(None, None))
-        self.badge = Tag()
-        for w in (self.thumb, self.title, self.info, self.badge):
-            self.add_widget(w)
-        self.frac = 0.0
-
-    def _sel_id(self):
-        return self.item.get('key')
-
-    def fill(self, item, idx, ctx):
-        lib = ctx.lib
-        key = item['key']
-        v = lib.videos.get(key, {})
-        self.title.ltext = lib.title(key)
-        dur = v.get('duration', 0) or lib.progress(key).get('dur', 0)
-        parts = []
-        if v.get('size'):
-            parts.append(core.fmt_size(v['size']))
-        if v.get('w') and v.get('h'):
-            parts.append('%dp' % min(v['w'], v['h']))
-        self.frac = lib.watched_fraction(key)
-        if self.frac > 0.02:
-            parts.append('%d%%' % int(self.frac * 100))
-        self.info.ltext = '  •  '.join(parts)
-        self.badge.set_text(core.fmt_time(dur) if dur else '')
-        self.set_thumb_for(self.thumb, key)
-
-    def relayout(self):
-        if self.item is None or self.ctx is None:
-            return
-        ctx = self.ctx
-        if self.unchanged(ctx.sel_mode, ctx.reorder, self.is_selected(), self.badge.ltext,
-                          round(self.frac, 3), self.title.ltext):
-            return
-        self.draw_selection()
-        tw, th = dp(128), dp(72)
-        cy = self.y + self.height / 2.0
-        self.thumb.size = (tw, th)
-        self.thumb.pos = ((self.x + self.width) - dp(16) - tw, cy - th / 2.0)
-        left = self.left_bound()
-        tx_right = self.thumb.x - dp(14)
-        w = max(10, tx_right - left)
-        self.fit_title(self.title, w, self.STEPS_SEL if ctx.sel_mode else self.STEPS)
-        # the title may need several lines: stack title + info as one block, centred on the thumbnail
-        self.title.size = (w, dp(10))
-        n = len(self.title.logical_lines())
-        ht = self.title.text_height(n) * (1.0 if n < 2 else 1.12)   # a little slack: tall glyphs (brackets) must not drop a line
-        hi = self.info.text_height(1)
-        gap = dp(1)
-        top = cy + (ht + gap + hi) / 2.0
-        self.title.pos = (left, top - ht)
-        self.title.size = (w, ht)
-        self.info.pos = (left, top - ht - gap - hi)
-        self.info.size = (w, hi)
-        watched = self.frac > 0.02
-        self.badge.pos = (self.thumb.x + tw - dp(6) - self.badge.width,
-                          self.thumb.y + (dp(11) if watched else dp(6)))
-        self.canvas.after.clear()
-        with self.canvas.after:
-            if watched:
-                bx, by, bwid = self.thumb.x + dp(8), self.thumb.y + dp(5), tw - dp(16)
-                Color(1, 1, 1, 0.30)
-                RoundedRectangle(pos=(bx, by), size=(bwid, dp(3)), radius=[dp(1.5)])
-                Color(*ACCENT)
-                RoundedRectangle(pos=(bx, by), size=(max(dp(3), bwid * min(1.0, self.frac)), dp(3)),
-                                 radius=[dp(1.5)])
-
-
-class CollRow(ListRow):
-    kind = 'coll'
-    STEPS = [(17.5, 1)]
-    STEPS_SEL = [(17.5, 1), (15.5, 2), (14, 2), (13, 3), (12, 3), (11.5, 4)]
-    INFO_STEPS_SEL = [(13.5, 1), (12.5, 1), (12, 2), (11.5, 2)]
-
-    def __init__(self, **kw):
-        super(CollRow, self).__init__(**kw)
-        self.thumb = Thumb(radius=dp(14), size=(dp(142), dp(80)))
-        self.title = Txt(font_size=sp(17.5), bold=True, valign='top', size_hint=(None, None))
-        self.info = Txt(font_size=sp(13.5), color=SUB, valign='top', size_hint=(None, None))
-        for w in (self.thumb, self.title, self.info):
-            self.add_widget(w)
-
-    def _sel_id(self):
-        return self.item['coll'].id
-
-    def fill(self, item, idx, ctx):
-        c = item['coll']
-        self.title.ltext = c.name
-        sub = core.count_videos_label(c.count)
-        if ctx.show_path and c.path:
-            sub = sub + '  •  ' + c.path
-        self.info.ltext = sub
-        self.set_thumb_for(self.thumb, ctx.lib.cover_key(c.keys))
-
-    def relayout(self):
-        if self.item is None or self.ctx is None:
-            return
-        ctx = self.ctx
-        if self.unchanged(ctx.sel_mode, ctx.reorder, self.is_selected(), self.title.ltext, self.info.ltext):
-            return
-        self.draw_selection()
-        tw, th = dp(142), dp(80)
-        cy = self.y + self.height / 2.0
-        self.thumb.size = (tw, th)
-        self.thumb.pos = ((self.x + self.width) - dp(16) - tw, cy - th / 2.0 - dp(3))
-        left = self.left_bound()
-        w = max(10, self.thumb.x - dp(16) - left)
-        self.fit_title(self.title, w, self.STEPS_SEL if ctx.sel_mode else self.STEPS)
-        self.fit_title(self.info, w, self.INFO_STEPS_SEL if ctx.sel_mode else [(13.5, 1)])
-        self.title.size = (w, dp(10))
-        self.info.size = (w, dp(10))
-        n = len(self.title.logical_lines())
-        ht = self.title.text_height(n) * (1.0 if n < 2 else 1.12)
-        hi = self.info.text_height(len(self.info.logical_lines()))
-        gap = dp(3)
-        top = cy + (ht + gap + hi) / 2.0
-        self.title.pos = (left, top - ht)
-        self.title.size = (w, ht)
-        self.info.pos = (left, top - ht - gap - hi)
-        self.info.size = (w, hi)
-        self.draw_peek(tw)
-
-    def draw_peek(self, tw):
-        self.canvas.after.clear()
-        top = self.thumb.y + self.thumb.height
-        with self.canvas.after:               # two cards peeking out behind the cover: "a stack"
-            Color(0.20, 0.21, 0.25, 1)
-            RoundedRectangle(pos=(self.thumb.x + dp(22), top - dp(1)), size=(tw - dp(44), dp(9)),
-                             radius=[dp(5), dp(5), 0, 0])
-            Color(0.29, 0.30, 0.35, 1)
-            RoundedRectangle(pos=(self.thumb.x + dp(11), top - dp(1)), size=(tw - dp(22), dp(5)),
-                             radius=[dp(5), dp(5), 0, 0])
-
-
-class GroupRow(CollRow):
-    """A folder ("مجلد") of lists: a cover with a folder tab and a folder badge."""
-    kind = 'group'
-
-    def __init__(self, **kw):
-        super(GroupRow, self).__init__(**kw)
-        self.badge = Icon(name='folder', color=[1, 1, 1, 0.95], size=(dp(22), dp(22)), stroke=1.8)
-        self.add_widget(self.badge)
-
-    def fill(self, item, idx, ctx):
-        c = item['coll']
-        self.title.ltext = c.name
-        self.info.ltext = core.count_lists_label(len(c.lists)) + '  •  ' + core.count_videos_label(c.count)
-        cover = None
-        for lst in c.lists:
-            cover = ctx.lib.cover_key(lst.keys)
-            if cover:
-                break
-        self.set_thumb_for(self.thumb, cover)
-
-    def draw_peek(self, tw):
-        self.canvas.after.clear()
-        top = self.thumb.y + self.thumb.height
-        with self.canvas.after:               # the tab of a folder, sticking out at the top
-            Color(0.29, 0.30, 0.35, 1)
-            RoundedRectangle(pos=(self.thumb.x + tw - dp(64), top - dp(1)), size=(dp(54), dp(9)),
-                             radius=[dp(6), dp(6), 0, 0])
-        self.badge.center = (self.thumb.x + dp(22), self.thumb.y + dp(22))
-        self.badge.canvas.before.clear()
-        with self.badge.canvas.before:         # dark disc so the badge reads on any cover
-            Color(0, 0, 0, 0.62)
-            Ellipse(pos=(self.badge.center_x - dp(16), self.badge.center_y - dp(16)), size=(dp(32), dp(32)))
-
-
-class CreateRow(Row):
-    kind = 'create'
-
-    LABEL = 'إنشاء قائمة تشغيل جديدة'
-
-    def __init__(self, **kw):
-        super(CreateRow, self).__init__(**kw)
-        self.label = Txt(ltext=self.LABEL, font_size=sp(15.5), bold=True, nlines=2, size_hint=(None, None))
-        self.plus = Icon(name='plus', color=list(ACCENT), size=(dp(26), dp(26)), stroke=1.8)
-        self.add_widget(self.label)
-        self.add_widget(self.plus)
-
-    def relayout(self):
-        if self.unchanged():
-            return
-        tw, th = dp(128), dp(72)                      # same footprint as a cover: rows line up
-        x = (self.x + self.width) - dp(16) - tw
-        y = (self.y + self.height / 2.0) - th / 2.0
-        self.canvas.before.clear()
-        with self.canvas.before:
-            Color(ACCENT[0], ACCENT[1], ACCENT[2], 0.07)
-            RoundedRectangle(pos=(x, y), size=(tw, th), radius=[dp(12)])
-            Color(ACCENT[0], ACCENT[1], ACCENT[2], 0.30)
-            Line(rounded_rectangle=(x + dp(0.5), y + dp(0.5), tw - dp(1.0), th - dp(1.0), dp(12)),
-                 width=dp(1.0), dash_length=dp(5), dash_offset=dp(4))
-            d = dp(38)                                # the plus sits in a soft disc
-            Color(ACCENT[0], ACCENT[1], ACCENT[2], 0.16)
-            Ellipse(pos=(x + tw / 2.0 - d / 2.0, y + th / 2.0 - d / 2.0), size=(d, d))
-        self.plus.center = (x + tw / 2.0, y + th / 2.0)
-        self.label.pos = (self.x + dp(16), (self.y + self.height / 2.0) - dp(30))
-        self.label.size = (x - dp(14) - self.x - dp(16), dp(60))
-
-
-class GCreateRow(CreateRow):
-    kind = 'gcreate'
-    LABEL = 'إنشاء مجلد جديد'
-
-
-ROW_FACTORIES = {'video': VideoRow, 'coll': CollRow, 'create': CreateRow, 'group': GroupRow,
-                 'gcreate': GCreateRow}
-
-
-# ---------------------------------------------------------------------------
-# header
-# ---------------------------------------------------------------------------
-class Header(Widget):
-    def __init__(self, **kw):
-        kw.setdefault('size_hint', (1, None))
-        kw.setdefault('height', dp(60))
-        super(Header, self).__init__(**kw)
-        self.title = Txt(bold=True, font_size=sp(20), size_hint=(None, None))
-        self.sub = Txt(color=SUB, font_size=sp(12.5), size_hint=(None, None))
-        self.add_widget(self.title)
-        self.add_widget(self.sub)
-        self.right_btns = []
-        self.left_btns = []
-        self.extra = None
-        self.big = False
-        self.bind(pos=self._lay, size=self._lay)
-
-    def set(self, title, sub='', right=(), left=(), big=False, extra=None, short=''):
-        for b in self.right_btns + self.left_btns:
-            if b.parent is self:
-                self.remove_widget(b)
-        if self.extra is not None and self.extra.parent is self:
-            self.remove_widget(self.extra)
-        self.right_btns, self.left_btns = list(right), list(left)
-        self.extra = extra
-        for b in self.right_btns + self.left_btns:
-            self.add_widget(b)
-        if extra is not None:
-            self.add_widget(extra)
-        self.big = big
-        self._full, self._short = title, short
-        self.title.ltext = title
-        self.title.font_size = sp(29) if big else sp(19.5)
-        self.sub.ltext = sub
-        self._lay()
-
-    def _lay(self, *a):
-        self.canvas.before.clear()
-        with self.canvas.before:
-            Color(*BG)
-            Rectangle(pos=self.pos, size=self.size)
-        x_r = (self.x + self.width) - dp(6)
-        for b in self.right_btns:
-            b.pos = (x_r - b.width, (self.y + self.height / 2.0) - b.height / 2.0)
-            x_r -= b.width
-        x_l = self.x + dp(6)
-        for b in self.left_btns:
-            b.pos = (x_l, (self.y + self.height / 2.0) - b.height / 2.0)
-            x_l += b.width
-        if not self.right_btns:
-            x_r = (self.x + self.width) - dp(16)
-        if self.extra is not None:
-            self.extra.pos = (x_l + dp(4), (self.y + self.height / 2.0) - self.extra.height / 2.0)
-            self.extra.width = max(10, x_r - x_l - dp(10))
-            self.title.size = (0, 0)
-            self.sub.size = (0, 0)
-            return
-        w = max(10, x_r - x_l - dp(8))
-        full, short = getattr(self, '_full', None), getattr(self, '_short', '')
-        if short and full is not None:                  # many buttons: a smaller "10 محدد", else just "10"
-            self.title.ltext = full
-            for fs in (19.5, 18, 16.5, 15.5):
-                self.title.font_size = sp(fs)
-                if self.title.text_width() <= w:
-                    break
-            else:
-                self.title.font_size = sp(19.5)
-                self.title.ltext = short
-        if self.sub.ltext:
-            self.title.pos = (x_l + dp(4), (self.y + self.height / 2.0) - dp(2))
-            self.title.size = (w, dp(28))
-            self.sub.pos = (x_l + dp(4), (self.y + self.height / 2.0) - dp(26))
-            self.sub.size = (w, dp(24))
-        else:
-            self.title.pos = (x_l + dp(4), self.y + (dp(4) if self.big else 0))
-            self.title.size = (w, self.height - (dp(4) if self.big else 0))
-            self.sub.size = (0, 0)
-
-
-# ---------------------------------------------------------------------------
-# helpers shared by pages: dialogs for common actions
-# ---------------------------------------------------------------------------
-def confirm(app, title, message, ok_label, on_ok, danger=True):
-    Dialog(app.root, title, message,
-           [(ok_label, on_ok, 'danger' if danger else 'primary'), ('إلغاء', None, 'plain')]).show()
-
-
-def ask_text(app, title, text, hint, on_ok, ok_label='حفظ'):
-    PromptDialog(app.root, title, text=text, hint=hint, ok_label=ok_label, on_ok=on_ok).show()
-
-
-def choose_playlist(app, keys, after=None):
-    """Sheet: add the given video keys to any list (or to a new one)."""
-    lib = app.lib
-    keys = list(keys)
-
-    def done(msg):
-        app.root.say(msg)
-        app.store.save()
-        if after:
-            after()
-        app.root.refresh_pages()
-
-    def build():
-        rows = [SheetTitle('إضافة إلى قائمة تشغيل'),
-                SheetRow('قائمة تشغيل جديدة', icon='plus', callback=lambda w: new())]
-        for c in lib.collections():
-            rows.append(SheetRow(c.name, icon='playlist', value=core.count_videos_label(c.count),
-                                 callback=lambda w, cid=c.id, nm=c.name: pick(cid, nm)))
-        return rows
-    sheet = MenuSheet(app.root, build)
-
-    def pick(cid, name):
-        sheet.dismiss()
-        n = lib.add_to_playlist(cid, keys)
-        if n:
-            done('تمت إضافة %d فيديو إلى «%s»' % (n, name))
-        else:
-            done('الفيديوهات موجودة بالفعل في «%s»' % name)
-
-    def new():
-        sheet.dismiss()
-        if not keys:
-            app.root.say('اختر فيديو واحد على الأقل')
-            return
-
-        def ok(name):
-            cid = lib.create_playlist(name, keys)
-            done('تم إنشاء «%s» (%d فيديو)' % (lib.collection(cid).name, len(keys)))
-        ask_text(app, 'قائمة تشغيل جديدة', '', 'اسم القائمة', ok, 'إنشاء')
-    sheet.show()
-
-
-def pick_lists(app, title, candidates, ok_label, on_done):
-    """Sheet with lists to tick (at least one); on_done(list_of_ids) when confirmed.
-
-    Ticking only touches the one row and the pinned button: rebuilding every row each time was slow."""
-    if not candidates:
-        app.root.say('لا توجد قوائم تشغيل لإضافتها')
-        return
-    chosen = []
-    ids = [c.id for c in candidates]
-    rows_by_id = {}
-    all_row = []
-
-    def all_label():
-        return 'إلغاء تحديد الكل' if len(chosen) == len(ids) else 'تحديد الكل'
-
-    def build():
-        rows_by_id.clear()
-        del all_row[:]
-        all_row.append(SheetRow(all_label(), icon='select_all', callback=lambda w: toggle_all()))
-        rows = [SheetTitle(title), all_row[0]]
-        for c in candidates:
-            r = SheetRow(c.name, icon='playlist', value=core.count_videos_label(c.count),
-                         checked=c.id in chosen, callback=lambda w, cid=c.id: toggle(cid))
-            rows_by_id[c.id] = r
-            rows.append(r)
-        return rows
-
-    def footer():                                # pinned at the bottom: always reachable however long the list
-        n = len(chosen)
-        return SheetButton('%s (%d)' % (ok_label, n) if n else 'اختر قائمة واحدة على الأقل',
-                           callback=lambda w: go(), enabled=bool(n))
-    sheet = MenuSheet(app.root, build, footer=footer)
-
-    def sync():
-        all_row[0].lbl.ltext = all_label()
-        sheet.refresh_footer()
-
-    def toggle(cid):
-        if cid in chosen:
-            chosen.remove(cid)
-        else:
-            chosen.append(cid)
-        rows_by_id[cid].set_checked(cid in chosen)
-        sync()
-
-    def toggle_all():
-        if len(chosen) == len(ids):
-            del chosen[:]
-        else:
-            chosen[:] = list(ids)
-        for cid, r in rows_by_id.items():
-            r.set_checked(cid in chosen)
-        sync()
-
-    def go():
-        if not chosen:
-            return
-        sheet.dismiss()
-        on_done(list(chosen))
-    sheet.show()
-
-
-def new_group_flow(app, after=None):
-    """Ask for a name, then for the lists to put in the new folder."""
-    lib = app.lib
-
-    def named(name):
-        def picked(cids):
-            gid = lib.create_group(name, cids)
-            app.store.save()
-            app.root.say('تم إنشاء المجلد «%s»' % lib.group(gid).name)
-            app.root.refresh_pages()
-            if after:
-                after(gid)
-        # the keyboard is still closing (the window is resizing): open the sheet when it is gone
-        Clock.schedule_once(lambda dt: pick_lists(app, 'اختر قوائم المجلد', lib.collections(), 'إنشاء المجلد', picked), 0.35)
-    ask_text(app, 'مجلد جديد', '', 'اسم المجلد', named, 'التالي')
-
-
-def sort_sheet(app, title, modes, get_state, set_state, extra=None):
-    """Generic 'sort by' sheet. get_state() -> (mode, asc); set_state(mode, asc).
-
-    The sheet keeps its own copy of the choice and redraws at once; the (slow) re-sorting of the
-    page behind it happens a moment later, so the sheet never freezes or jumps.  Its rows are the
-    same in every mode, so its height never changes either."""
-    cur = list(get_state())
-
-    def build():
-        mode, asc = cur
-        rows = [SheetTitle(title)]
-        for m in modes:
-            rows.append(SheetRow(core.SORT_LABELS.get(m, m), checked=(m == mode),
-                                 callback=lambda w, m=m: pick(m)))
-        rows.append(SheetLabel('الاتجاه'))
-        rows.append(SheetRow('تصاعدي', icon='arrow_up', checked=asc, callback=lambda w: setd(True)))
-        rows.append(SheetRow('تنازلي', icon='arrow_down', checked=not asc, callback=lambda w: setd(False)))
-        return rows
-    sheet = MenuSheet(app.root, build)
-
-    def apply(mode, asc):
-        set_state(mode, asc)
-        cur[0], cur[1] = get_state()          # what the page really stored (manual order resets it)
-        sheet.rebuild()
-
-    def pick(m):
-        if m == cur[0]:
-            return
-        cur[0] = m
-        if m == 'manual':
-            cur[1] = True
-        sheet.rebuild()
-        Clock.schedule_once(lambda dt: apply(cur[0], cur[1]), 0.05)
-
-    def setd(a):
-        if a == cur[1]:
-            return
-        cur[1] = a
-        sheet.rebuild()
-        Clock.schedule_once(lambda dt: apply(cur[0], cur[1]), 0.05)
-    sheet.show()
-    return sheet
-
-
-def share_keys(app, keys):
-    """Open the system share sheet for the given video keys."""
-    vids = [app.lib.videos[k] for k in keys if k in app.lib.videos]
-    if not vids:
-        app.root.say('لا توجد فيديوهات للمشاركة')
-        return
-    if not bridge.share_videos(vids):
-        app.root.say('تعذرت المشاركة: ' + (bridge.LAST_SHARE_ERROR[0] or ''))
-
-
-def selection_keys(ctx, lib):
-    return [k for k in ctx.selected if k in lib.videos]
-
-
-# ---------------------------------------------------------------------------
-# tab bar + nav bar
-# ---------------------------------------------------------------------------
-class TabBar(Widget):
-    def __init__(self, tabs, on_pick, **kw):
-        kw.setdefault('size_hint', (1, None))
-        kw.setdefault('height', dp(52))
-        super(TabBar, self).__init__(**kw)
-        self.tabs = tabs                  # [(id, label)] in display order: first = rightmost
-        self.on_pick = on_pick
-        self.current = tabs[0][0]
-        self.labels = {}
-        self._hit = []
-        for tid, label in tabs:
-            t = Txt(ltext=label, font_size=sp(15.5), size_hint=(None, None), halign='center')
-            self.labels[tid] = t
-            self.add_widget(t)
-        self.bind(pos=self._lay, size=self._lay)
-
-    def set_current(self, tid):
-        self.current = tid
-        self._lay()
-
-    def _lay(self, *a):
-        self.canvas.before.clear()          # never canvas.clear(): it would drop the children
-        x = (self.x + self.width) - dp(16)
-        self._hit = []
-        ch = dp(38)
-        cy0 = self.y + (self.height - ch) / 2.0
-        gap = dp(8)
-        avail = self.width - dp(32)
-        for tid, label in self.tabs:
-            t = self.labels[tid]
-            active = tid == self.current
-            t.bold = active
-            t.color = ACCENT if active else (0.80, 0.82, 0.87, 1)
-        pad = dp(34)
-        for fs in (15.5, 14.5, 13.5, 12.5):          # shrink until all the chips fit on the screen
-            for tid, label in self.tabs:
-                self.labels[tid].font_size = sp(fs)
-            texts = [max(dp(30), self.labels[tid].text_width()) for tid, label in self.tabs]
-            pad = (avail - gap * (len(texts) - 1) - sum(texts)) / float(len(texts))
-            if pad >= dp(26):
-                break
-        pad = min(dp(34), max(dp(12), pad))
-        with self.canvas.before:
-            Color(*BG)
-            Rectangle(pos=self.pos, size=self.size)
-            for tid, label in self.tabs:
-                t = self.labels[tid]
-                active = tid == self.current
-                cw = max(dp(30), t.text_width()) + pad
-                cx0 = x - cw
-                Color(*(ACCENT_SOFT if active else SURFACE))
-                RoundedRectangle(pos=(cx0, cy0), size=(cw, ch), radius=[ch / 2.0])
-                if active:
-                    Color(ACCENT[0], ACCENT[1], ACCENT[2], 0.55)
-                    Line(rounded_rectangle=(cx0 + 0.5, cy0 + 0.5, cw - 1, ch - 1, ch / 2.0), width=1)
-                t.size = (cw, ch)
-                t.pos = (cx0, cy0)
-                self._hit.append((cx0 - dp(4), cx0 + cw + dp(4), tid))
-                x = cx0 - gap
-
-    def on_touch_down(self, touch):
-        if not self.collide_point(*touch.pos):
-            return False
-        for x0, x1, tid in self._hit:
-            if x0 <= touch.x <= x1:
-                if tid != self.current:
-                    self.on_pick(tid)
-                return True
-        return True
-
-
-class NavBar(Widget):
-    def __init__(self, items, on_pick, **kw):
-        kw.setdefault('size_hint', (1, None))
-        kw.setdefault('height', dp(60))
-        super(NavBar, self).__init__(**kw)
-        self.items = items               # [(id, icon, label)] first = rightmost
-        self.on_pick = on_pick
-        self.current = items[0][0]
-        self.icons, self.labels = {}, {}
-        for nid, icon, label in items:
-            ic = Icon(name=icon, size=(dp(26), dp(26)))
-            lb = Txt(ltext=label, font_size=sp(12), halign='center', size_hint=(None, None))
-            self.icons[nid], self.labels[nid] = ic, lb
-            self.add_widget(ic)
-            self.add_widget(lb)
-        self.bind(pos=self._lay, size=self._lay)
-
-    def set_current(self, nid):
-        self.current = nid
-        self._lay()
-
-    def _lay(self, *a):
-        self.canvas.before.clear()
-        with self.canvas.before:
-            Color(0.12, 0.12, 0.125, 1)
-            Rectangle(pos=self.pos, size=self.size)
-        n = len(self.items)
-        cw = self.width / float(n)
-        for i, (nid, icon, label) in enumerate(self.items):
-            cx = (self.x + self.width) - cw * (i + 0.5)
-            ic, lb = self.icons[nid], self.labels[nid]
-            col = ACCENT if nid == self.current else (0.62, 0.62, 0.64, 1)
-            ic.color = list(col)
-            lb.color = col
-            ic.center = (cx, self.y + self.height - dp(18))
-            lb.size = (cw, dp(18))
-            lb.pos = (cx - cw / 2.0, self.y + dp(5))
-
-    def on_touch_down(self, touch):
-        if not self.collide_point(*touch.pos):
-            return False
-        n = len(self.items)
-        i = int(((self.x + self.width) - touch.x) // (self.width / float(n)))
-        i = max(0, min(n - 1, i))
-        self.on_pick(self.items[i][0])
-        return True
-
-
-# ---------------------------------------------------------------------------
-# settings pane
-# ---------------------------------------------------------------------------
-_app_grad = {}
-
-
-def _app_gradient():
-    t = _app_grad.get('t')
-    if t is None:
-        from kivy.graphics.texture import Texture
-        t = Texture.create(size=(1, 2), colorfmt='rgba')
-        # first row = bottom of the picture: pink below, coral above (the colours of the app icon)
-        t.blit_buffer(bytes([240, 52, 110, 255, 255, 122, 96, 255]), colorfmt='rgba', bufferfmt='ubyte')
-        t.mag_filter = 'linear'
-        _app_grad['t'] = t
-    return t
-
-
-class AppCard(Widget):
-    """Name + logo + a one line summary, at the top of the settings."""
-
-    def __init__(self, **kw):
-        kw.setdefault('size_hint', (1, None))
-        kw.setdefault('height', dp(100))
-        super(AppCard, self).__init__(**kw)
-        self.title = Txt(ltext='Pro Player', bold=True, font_size=sp(21), size_hint=(None, None))
-        self.sub = Txt(ltext='', color=SUB, font_size=sp(14), size_hint=(None, None))
-        self.add_widget(self.title)
-        self.add_widget(self.sub)
-        self.bind(pos=self._lay, size=self._lay)
-        self._lay()
-
-    def set_summary(self, text):
-        self.sub.ltext = text
-
-    def _lay(self, *a):
-        x, y, w, h = self.x, self.y, self.width, self.height
-        self.canvas.before.clear()
-        with self.canvas.before:
-            Color(*SURFACE)
-            RoundedRectangle(pos=(x, y), size=(w, h), radius=[dp(20)])
-            bs = dp(58)
-            bx, by = (x + w) - dp(20) - bs, y + (h - bs) / 2.0
-            Color(1, 1, 1, 1)
-            RoundedRectangle(pos=(bx, by), size=(bs, bs), radius=[dp(16)], texture=_app_gradient())
-            m = bs * 0.2
-            cx, cy = bx + bs / 2.0, by + bs / 2.0
-            Color(1, 1, 1, 1)
-            Triangle(points=[cx - m * 0.75, cy - m * 1.05, cx - m * 0.75, cy + m * 1.05, cx + m * 1.2, cy])
-        tx = bx - dp(16)
-        self.title.pos = (x + dp(20), y + h / 2.0 - dp(2))
-        self.title.size = (tx - x - dp(20), dp(30))
-        self.sub.pos = (x + dp(20), y + h / 2.0 - dp(32))
-        self.sub.size = (tx - x - dp(20), dp(28))
-
-
-class SettingsPane(FloatLayout):
-    def __init__(self, app, **kw):
-        super(SettingsPane, self).__init__(**kw)
-        self.app = app
-        self.sv = make_scroll(size_hint=(1, 1))
-        self.box = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(4),
-                             padding=[dp(14), dp(8), dp(14), dp(30)])
-        self.box.bind(minimum_height=self.box.setter('height'))
-        self.sv.add_widget(self.box)
-        self.add_widget(self.sv)
-        self.build()
-
-    def S(self, key):
-        return self.app.store.setting(key)
-
-    def put(self, key, value):
-        self.app.store.set_setting(key, value)
-
-    def card(self, title, rows):
-        """A heading and a rounded card with the given rows."""
-        self.box.add_widget(SheetLabel(title))
-        g = Group(inset=(dp(16), dp(16) + SettingRow.TILE + dp(13)))
-        for r in rows:
-            g.add_row(r)
-        self.box.add_widget(g)
-
-    def switch(self, key, title, sub, icon):
-        sw = PillSwitch(value=bool(self.S(key)), on_change=lambda v, k=key: self.put(k, v))
-        return SettingRow(title, sub, icon=icon, switch=sw, callback=lambda w: sw._toggle())
-
-    def choice(self, key, title, sub, icon, options, fmt):
-        return SettingRow(title, sub, icon=icon, value=fmt(self.S(key)),
-                          callback=lambda w: self.pick_number(key, title, options, fmt))
-
-    def build(self):
-        lib = self.app.lib
-        box = self.box
-        box.clear_widgets()
-        n_vid = len(lib.videos)
-        n_pl = len([c for c in lib.collections()])
-        head = AppCard()
-        head.set_summary('%d فيديو  •  %d قائمة تشغيل' % (n_vid, n_pl))
-        box.add_widget(head)
-        play = [self.switch('resume', 'استكمال التشغيل', 'من آخر مكان توقفت عنده', 'clock'),
-                self.switch('autoplay_next', 'الفيديو التالي تلقائياً', 'عند انتهاء الفيديو الحالي', 'next'),
-                self.switch('keep_awake', 'إبقاء الشاشة مضاءة', 'أثناء تشغيل الفيديو', 'brightness')]
-        if bridge.ANDROID and (not bridge.hw_enabled() or bridge.hw_bad_count()):
-            # hardware decoding was switched off after a failure: let the user try it again
-            play.append(SettingRow('إعادة تفعيل الهاردوير', 'تم إيقافه بعد مشكلة في التشغيل', icon='restore',
-                                   callback=lambda w: self.reset_hw()))
-        self.card('التشغيل', play)
-        self.card('التحكم', [
-            self.switch('gestures', 'إيماءات السحب', 'تقديم وترجيع، سطوع، صوت', 'tune'),
-            self.choice('hold_speed', 'السرعة عند الضغط المطول', '', 'speed', [1.5, 2.0, 2.5, 3.0],
-                        core.fmt_speed),
-            self.choice('seek_step', 'مدة التقديم والترجيع', '', 'step_fwd', [5, 10, 15, 30],
-                        lambda x: '%d ث' % x)])
-        self.card('الترجمة', [
-            self.switch('sub_on', 'تشغيل الترجمة تلقائياً', 'إن وُجد ملف ترجمة', 'subtitle'),
-            self.choice('sub_size', 'حجم الترجمة', '', 'edit', [16, 20, 22, 26, 30, 36],
-                        lambda x: str(int(x)))])
-        n_back = len(lib.restorable())
-        self.card('عام', [
-            self.switch('vibrate', 'الاهتزاز', 'عند تحديد العناصر', 'bolt'),
-            SettingRow('استعادة القوائم المحذوفة', '', icon='restore',
-                       value=('%d' % n_back) if n_back else '—', callback=lambda w: self.restore())])
-        tsdk = bridge.target_sdk()
-        box.add_widget(SheetLabel('Pro Player  •  بناء %s%s' % (core.BUILD, ('  •  API %d' % tsdk) if tsdk else ''),
-                                  muted=True))
-
-    def pick_number(self, key, title, options, fmt):
-        cur = self.S(key)
-
-        def build():
-            rows = [SheetTitle(title)]
-            for o in options:
-                rows.append(SheetRow(fmt(o), checked=abs(float(o) - float(cur)) < 1e-6,
-                                     callback=lambda w, o=o: pick(o)))
-            return rows
-        sheet = MenuSheet(self.app.root, build)
-
-        def pick(o):
-            sheet.dismiss()
-            self.put(key, o)
-            self.build()
-        sheet.show()
-
-    def reset_hw(self):
-        bridge.hw_reset()
-        self.app.root.say('تم تفعيل التشغيل بالهاردوير')
-        self.build()
-
-    def restore(self):
-        """Sheet with the deleted lists: tick the ones to bring back (or all of them)."""
-        app, lib = self.app, self.app.lib
-        rows_data = lib.restorable()
-        if not rows_data:
-            app.root.say('لا توجد قوائم محذوفة')
-            return
-        chosen = set()
-        rows_by_id = {}
-        all_row = []
-
-        def all_label():
-            return 'إلغاء تحديد الكل' if len(chosen) == len(rows_data) else 'تحديد الكل'
-
-        def build():
-            rows_by_id.clear()
-            del all_row[:]
-            all_row.append(SheetRow(all_label(), icon='select_all', callback=lambda w: toggle_all()))
-            rows = [SheetTitle('استعادة القوائم المحذوفة'), all_row[0]]
-            for cid, name, cnt in rows_data:
-                r = SheetRow(name, icon='playlist', value=core.count_videos_label(cnt),
-                             checked=cid in chosen, callback=lambda w, cid=cid: toggle(cid))
-                rows_by_id[cid] = r
-                rows.append(r)
-            return rows
-
-        def footer():
-            n = len(chosen)
-            return SheetButton('استعادة المحدد (%d)' % n if n else 'اختر قوائم للاستعادة',
-                               callback=lambda w: go(), enabled=bool(n))
-        sheet = MenuSheet(app.root, build, footer=footer)
-
-        def sync():
-            all_row[0].lbl.ltext = all_label()
-            sheet.refresh_footer()
-
-        def toggle(cid):
-            if cid in chosen:
-                chosen.discard(cid)
-            else:
-                chosen.add(cid)
-            rows_by_id[cid].set_checked(cid in chosen)
-            sync()
-
-        def toggle_all():
-            if len(chosen) == len(rows_data):
-                chosen.clear()
-            else:
-                chosen.update(r[0] for r in rows_data)
-            for cid, r in rows_by_id.items():
-                r.set_checked(cid in chosen)
-            sync()
-
-        def go():
-            sheet.dismiss()
-            n = lib.restore_collections(list(chosen))
-            app.store.save()
-            app.root.say('تمت استعادة %d قائمة' % n)
-            app.root.refresh_pages()
-        sheet.show()
-
-
-# ---------------------------------------------------------------------------
-# list-page mixin: selection mode handling shared by Home / Collection / Picker
-# ---------------------------------------------------------------------------
-class ListPageMixin(object):
-    def init_list(self):
-        self.ctx = Ctx(self.app)
-        self.vlist = VList(ROW_FACTORIES, row_h=dp(100), size_hint=(None, None))
-        self.vlist.ctx = self.ctx
-        self.vlist.on_tap = self._tap
-        self.vlist.on_long = self._long
-        self.vlist.on_reorder = self._reorder
-        self.vlist.can_drag = self._can_drag
-        self.vlist.prefetch = self._prefetch_rows
-
-    def _prefetch_rows(self, first, last):
-        items = self.vlist.items
-        for i in range(first, last + 1):
-            it = items[i]
-            if isinstance(it, dict) and it.get('kind') == 'video' and it.get('key'):
-                self.app.prefetch_thumb(it['key'])
-
-    # overridables
-    def open_item(self, idx, item):
-        pass
-
-    def item_id(self, item):
-        k = item.get('kind')
-        if k == 'video':
-            return item['key']
-        if k in ('coll', 'group'):
-            return item['coll'].id
-        return None
-
-    def selectable(self, item):
-        return self.item_id(item) is not None
-
-    def on_selection_changed(self):
-        pass
-
-    def _can_drag(self, idx, item):
-        return self.selectable(item) and self.ctx.reorder
-
-    def _reorder(self, src, dst):
-        pass
-
-    def _tap(self, idx, item, x):
-        if self.ctx.sel_mode:
-            sid = self.item_id(item)
-            if sid is None:
-                return
-            if sid in self.ctx.selected:
-                self.ctx.selected.discard(sid)
-            else:
-                self.ctx.selected.add(sid)
-            if not self.ctx.selected:
-                self.exit_selection()
-            else:
-                self.vlist.refresh()
-                self.on_selection_changed()
-        else:
-            self.open_item(idx, item)
-
-    def _long(self, idx, item):
-        if not self.selectable(item):
-            return
-        bridge.vibrate(30) if self.app.store.setting('vibrate') else None
-        self.ctx.sel_mode = True
-        self.ctx.selected.add(self.item_id(item))
-        self.vlist.refresh()
-        self.on_selection_changed()
-
-    def exit_selection(self):
-        self.ctx.sel_mode = False
-        self.ctx.selected.clear()
-        self.vlist.refresh()
-        self.on_selection_changed()
-
-    def select_all(self):
-        ids = [self.item_id(i) for i in self.vlist.items if self.selectable(i)]
-        if len(self.ctx.selected) >= len(ids):
-            self.ctx.selected.clear()
-            self.exit_selection()
-            return
-        self.ctx.selected = set(ids)
-        self.vlist.refresh()
-        self.on_selection_changed()
-
-
-# ---------------------------------------------------------------------------
-# shared actions on videos
-# ---------------------------------------------------------------------------
-def rename_video_dialog(app, key, after):
-    lib = app.lib
-
-    def ok(name):
-        lib.rename_video(key, name)
-        after()
-    ask_text(app, 'تعديل الاسم', lib.title(key), 'اسم الفيديو', ok)
-
-
-def delete_videos_dialog(app, keys, after):
-    lib = app.lib
-    vids = [lib.videos[k] for k in keys if k in lib.videos]
-    if not vids:
-        return
-
-    def run():
-        def done(paths):
-            if paths:
-                lib.forget_videos(paths)
-                app.root.say('تم حذف %d فيديو من الجهاز' % len(paths))
-            else:
-                app.root.say('لم يتم حذف أي ملف')
-            app.store.save()
-            after()
-        bridge.delete_videos(vids, done)
-    confirm(app, 'حذف من الجهاز',
-            'سيتم حذف %d فيديو نهائياً من الجهاز ولا يمكن التراجع.' % len(vids), 'حذف', run)
-
-
-# ---------------------------------------------------------------------------
-# Home page
-# ---------------------------------------------------------------------------
-class HomePage(Page, ListPageMixin):
-    TABS = [('videos', 'مقاطع فيديو'), ('playlists', 'قوائم التشغيل'), ('groups', 'المجلدات')]
-    NAVS = [('library', 'folder_play', 'على الجهاز'), ('history', 'clock', 'السجل'), ('me', 'person', 'الإعدادات')]
-
-    def __init__(self, app, **kw):
-        super(HomePage, self).__init__(app, **kw)
-        self.init_list()
-        self.mode = 'playlists'
-        self.nav = 'library'
-        self.query = ''
-        self.search_on = False
-        self.field = None
-        self.header = Header()
-        self.tabs = TabBar(self.TABS, self.set_tab)
-        self.tabs.set_current(self.mode)
-        self.navbar = NavBar(self.NAVS, self.set_nav)     # kept for code paths, never shown
-        self.me = SettingsPane(app, size_hint=(None, None))
-        self.empty = EmptyState('folder_play')
-        for w in (self.vlist, self.header, self.tabs, self.empty):
-            self.add_widget(w)
-        self.btn_search = IconButton('search', callback=lambda w: self.toggle_search(True))
-        self.btn_sort = IconButton('sort', callback=lambda w: self.open_sort())
-        self.btn_close = IconButton('close', callback=lambda w: self.exit_selection())
-        self.btn_menu = IconButton('dots', callback=lambda w: self.app.root.push(SettingsPage(self.app)))
-        self.bind(pos=self._lay, size=self._lay)
-        self._lay()
-        self.update_header()
-
-    # ---- layout ------------------------------------------------------------
-    def _lay(self, *a):
-        W, H = self.size
-        nb = 0
-        hh = dp(72) if (self.nav == 'library' and not self.ctx.sel_mode) else dp(60)
-        self.header.size = (W, hh)
-        self.header.pos = (self.x, (self.y + self.height) - hh)
-        top = self.header.y
-        if self.nav == 'library':
-            self.tabs.size = (W, dp(52))
-            self.tabs.pos = (self.x, top - dp(52))
-            top -= dp(56)
-            self.tabs.opacity = 1
-        else:
-            self.tabs.opacity = 0
-            self.tabs.size = (W, 0)
-        self.vlist.pos = (self.x, self.y + nb)
-        self.vlist.size = (W, max(0, top - (self.y + nb)))
-        self.me.pos = (self.x, self.y + nb)
-        self.me.size = (W, max(0, self.header.y - (self.y + nb)))
-        self.empty.pos = (self.x + dp(30), self.vlist.y + self.vlist.height * 0.35)
-        self.empty.size = (W - dp(60), dp(80))
-
-    # ---- navigation ------------------------------------------------------------
-    def set_tab(self, tid):
-        self.exit_selection_silent()
-        self.mode = tid
-        self.tabs.set_current(tid)
-        self.vlist.scroll = 0
-        self.rebuild()
-
-    def set_nav(self, nid):
-        self.exit_selection_silent()
-        self.nav = nid
-        self.navbar.set_current(nid)
-        if self.search_on:
-            self.toggle_search(False)
-        if self.me.parent is self:
-            self.remove_widget(self.me)
-        if nid == 'me':
-            self.me.build()
-            self.vlist.opacity = 0
-            self.vlist.disabled = True
-            self.add_widget(self.me)
-            self.remove_widget(self.navbar)
-            self.add_widget(self.navbar)
-        else:
-            self.vlist.opacity = 1
-            self.vlist.disabled = False
-            self.vlist.scroll = 0
-        self._lay()
-        self.rebuild()
-
-    def exit_selection_silent(self):
-        self.ctx.sel_mode = False
-        self.ctx.selected.clear()
-        self.ctx.reorder = False
-
-    def on_back(self):
-        if self.ctx.sel_mode:
-            self.exit_selection()
-            return True
-        if self.search_on:
-            self.toggle_search(False)
-            return True
-        if self.nav != 'library':
-            self.set_nav('library')
-            return True
-        return False
-
-    def on_show(self):
-        self.vlist.scroll = 0
-        self.rebuild()
-
-    def on_resume(self):
-        self.refresh()                      # the list stays where the user left it
+        self.app.apply_topbar(self)
 
     def refresh(self):
-        if self.nav == 'me':
-            self.me.build()
-        self.rebuild()
+        if self.scrolling:
+            self.col.clear_widgets()
+            self.build(self.col)
+            self.sv.scroll_y = 1
 
-    # ---- data -> items -------------------------------------------------------------
-    def _match(self, text):
-        q = self.query.strip()
-        if not q:
-            return True
-        return core.natural_key(q) == core.natural_key(text) or \
-            q.casefold() in (text or '').casefold()
+    def build(self, col):
+        pass
 
-    def build_items(self):
-        lib = self.app.lib
-        items = []
-        if self.nav == 'history':
-            for k in lib.history():
-                if self._match(lib.title(k)):
-                    items.append({'kind': 'video', 'key': k})
-            return items
-        if self.mode == 'playlists':
-            if not self.query:
-                items.append({'kind': 'create'})
-            for c in lib.collections():
-                if self._match(c.name):
-                    items.append({'kind': 'coll', 'coll': c})
-        elif self.mode == 'groups':
-            if not self.query:
-                items.append({'kind': 'gcreate'})
-            for c in lib.groups():
-                if self._match(c.name):
-                    items.append({'kind': 'group', 'coll': c})
-        elif self.mode == 'folders':
-            for c in lib.folders():
-                if self._match(c.name):
-                    items.append({'kind': 'coll', 'coll': c})
-        else:
-            for k in lib.all_videos_sorted():
-                if self._match(lib.title(k)):
-                    items.append({'kind': 'video', 'key': k})
-        return items
 
-    def rebuild(self):
-        if self.nav == 'me':
-            self.update_header()
-            return
-        self.ctx.show_path = (self.nav == 'library' and self.mode == 'folders')
-        self.ctx.reorder = bool(self.ctx.sel_mode and self.nav == 'library' and self.mode in ('playlists', 'groups'))
-        self.vlist.reorderable = self.ctx.reorder
-        items = self.build_items()
-        self.vlist.set_items(items)
-        if not items or (len(items) == 1 and items[0]['kind'] in ('create', 'gcreate')):
-            if not self.app.loaded:
-                self.empty.icon.name = 'clock'
-                self.empty.ltext = 'جارٍ تحميل الفيديوهات…'
-            elif not self.app.permitted:
-                self.empty.icon.name = 'lock'
-                self.empty.ltext = 'يلزم السماح بالوصول إلى الفيديوهات.\nاسمح بالوصول من إعدادات الهاتف ثم ارجع للتطبيق.'
-            elif self.nav == 'history':
-                self.empty.icon.name = 'clock'
-                self.empty.ltext = 'لا يوجد سجل مشاهدة بعد'
-            elif self.query:
-                self.empty.icon.name = 'search'
-                self.empty.ltext = 'لا توجد نتائج'
-            elif self.mode == 'groups':
-                self.empty.icon.name = 'folder'
-                self.empty.ltext = 'لا توجد مجلدات بعد.\nاضغط «إنشاء مجلد جديد» لتجميع عدة قوائم تحت اسم واحد.'
-            else:
-                self.empty.icon.name = 'folder_play'
-                self.empty.ltext = 'لا توجد فيديوهات'
-        else:
-            self.empty.ltext = ''
-        self.update_header()
+class IconTile(BoxLayout):
+    """Rounded, softly tinted square with an icon in the middle."""
 
-    # ---- header --------------------------------------------------------------------
-    def update_header(self):
-        ctx = self.ctx
-        self._lay()
-        if ctx.sel_mode:
-            n = len(ctx.selected)
-            right = [self.btn_close]
-            left = self._action_buttons()
-            self.header.set('%d محدد' % n, '', right, left, short=str(n))
-            return
-        if self.search_on:
-            self.header.set('', '', [IconButton('close', callback=lambda w: self.toggle_search(False))], [],
-                            extra=self.field)
-            return
-        if self.nav == 'history':
-            self.header.set('السجل', '', [], [self.btn_search])
-        elif self.nav == 'me':
-            self.header.set('الإعدادات', '', [], [])
-        else:
-            left = [self.btn_menu, self.btn_search]
-            if self.mode not in ('folders', 'groups'):
-                left.append(self.btn_sort)
-            self.header.set('على الجهاز', '', [], left, big=True)
+    def __init__(self, icon, color=None, size=dp(48), **kw):
+        kw.setdefault('size_hint', (None, None))
+        kw.setdefault('size', (size, size))
+        kw.setdefault('padding', size * 0.23)
+        super().__init__(**kw)
+        col = list(color or C('primary'))[:3] + [1]
+        with self.canvas.before:
+            Color(*alpha(col, 0.18))
+            self._r = RoundedRectangle(pos=self.pos, size=self.size, radius=[size * 0.3])
+        self.bind(pos=self._u, size=self._u)
+        self.add_widget(Icon(name=icon, color=col))
 
-    def _action_buttons(self):
-        n = len(self.ctx.selected)
-        btns = [IconButton('select_all', callback=lambda w: self.select_all())]
-        videos = self.nav == 'history' or self.mode == 'videos'
-        btns.append(IconButton('share', callback=lambda w: self.act_share()))
-        if self.mode == 'groups' and self.nav == 'library':
-            if n == 1:
-                btns.append(IconButton('edit', callback=lambda w: self.act_rename()))
-            btns.append(IconButton('trash', color=DANGER, callback=lambda w: self.act_delete()))
-            return btns
-        if videos:
-            btns.append(IconButton('playlist_add', callback=lambda w: self.act_add()))
-            if n == 1:
-                btns.append(IconButton('edit', callback=lambda w: self.act_rename()))
-            btns.append(IconButton('trash', color=DANGER, callback=lambda w: self.act_delete()))
-        elif self.mode == 'playlists':
-            btns.append(IconButton('folder_add', callback=lambda w: self.act_make_folder()))
-            if n == 1:
-                btns.append(IconButton('edit', callback=lambda w: self.act_rename()))
-            btns.append(IconButton('trash', color=DANGER, callback=lambda w: self.act_delete()))
-        else:
-            btns.append(IconButton('playlist_add', callback=lambda w: self.act_add()))
-        return btns
+    def _u(self, *a):
+        self._r.pos = self.pos
+        self._r.size = self.size
 
-    def on_selection_changed(self):
-        self.ctx.reorder = bool(self.ctx.sel_mode and self.nav == 'library' and self.mode in ('playlists', 'groups'))
-        self.vlist.reorderable = self.ctx.reorder
-        self.update_header()
-        self.vlist.refresh()
 
-    # ---- search ----------------------------------------------------------------------
-    def toggle_search(self, on):
-        if on:
-            self.field = FieldInput(text='', hint='بحث…')
-            self.field.size_hint = (None, None)
-            self.field.height = dp(44)
-            self.field.ti.bind(text=self._on_query)
-            self.search_on = True
-            self.update_header()
-            Clock.schedule_once(self._focus_field, 0.15)
-        else:
-            if self.field is not None:
-                self.field.release()
-            self.search_on = False
-            self.field = None
-            self.query = ''
-            self.update_header()
-            self.rebuild()
+# ======================================================================
+# Home
+# ======================================================================
+def streak_message(n):
+    if n <= 0:
+        return tr('streak_msg0')
+    if n < 3:
+        return tr('streak_msg1')
+    if n < 7:
+        return tr('streak_msg2')
+    if n < 30:
+        return tr('streak_msg3')
+    return tr('streak_msg4')
 
-    def _focus_field(self, dt):
-        if self.field is not None and self.search_on:
-            self.field.focus()
 
-    def _on_query(self, inst, value):
-        self.query = value
-        self.rebuild()
+class HomeScreen(BaseScreen):
+    def topbar_spec(self):
+        return (tr('welcome'), 'menu', [], {'sub': tr('home_sub'), 'logo': True})
 
-    # ---- sorting -----------------------------------------------------------------------
-    def open_sort(self):
-        lib, app = self.app.lib, self.app
-        if self.nav == 'library' and self.mode == 'playlists':
-            def build():
-                return [SheetTitle('ترتيب القوائم'),
-                        SheetRow('حسب الاسم', icon='sort', callback=lambda w: apply('name')),
-                        SheetRow('حسب عدد المقاطع', icon='sort', callback=lambda w: apply('count')),
-                        SheetLabel('أو اضغط مطولاً على أي قائمة ثم اسحبها لمكانك', muted=True)]
-            sheet = MenuSheet(app.root, build)
+    def build(self, col):
+        app, db = self.app, self.app.db
+        st = db.stats()
+        streak = db.get_streak()
 
-            def apply(how):
-                sheet.dismiss()
-                cs = lib.collections()
-                if how == 'name':
-                    cs.sort(key=lambda c: core.natural_key(c.name))
-                else:
-                    cs.sort(key=lambda c: -c.count)
-                lib.set_collections_order([c.id for c in cs])
-                self.rebuild()
-            sheet.show()
-            return
+        # --- streak + daily goal ---------------------------------------
+        card = auto_card(padding=[dp(16), dp(14)], spacing=dp(12), radius=dp(22))
+        row = hbox(dp(96), spacing=dp(14))
+        flame = FlameWidget(days=streak, size_hint=(None, 1), width=dp(84))
+        info = BoxLayout(orientation='vertical', spacing=dp(2))
+        num_row = hbox(dp(48), spacing=dp(8))
+        num = label(str(streak), size=40, bold=True, wrap=False, size_hint=(None, 1),
+                    width=dp(30 + 22 * len(str(streak))))
+        num.color = C('accent') if streak else C('sub')
+        cap = label(tr('days_in_row'), size=16, color='sub', bold=True, wrap=False, size_hint=(1, 1))
+        add_row(num_row, [num, cap])
+        info.add_widget(num_row)
+        info.add_widget(label(streak_message(streak), size=14, color='sub'))
+        add_row(row, [flame, info])
+        card.add_widget(row)
+        card.add_widget(WeekStrip(db.week_activity(), tr('weekdays').split(',')))
+        done, _ = db.today_answers()
+        goal = max(1, db.get_int('daily_goal', 20))
+        goal_row = hbox(dp(22))
+        add_row(goal_row, [
+            label(tr('daily_goal'), size=14, bold=True, wrap=False, size_hint_y=1),
+            label('%d / %d' % (min(done, goal), goal), size=14, color='sub', bold=True,
+                  wrap=False, size_hint_y=1, align='left' if rtl.UI_RTL else 'right')])
+        card.add_widget(goal_row)
+        card.add_widget(BarProgress(value=min(1.0, done / float(goal)),
+                                    fg=C('success') if done >= goal else C('accent'),
+                                    height=dp(10)))
+        col.add_widget(card)
 
-        def get():
-            s = app.store.setting('videos_sort')
-            return s.get('mode', 'date'), s.get('asc', False)
+        # --- stats ---------------------------------------------------------
+        srow = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(98), spacing=dp(10))
+        stat_cards = []
+        for val, cap_key, colr in ((st['words'], 'stat_words', 'primary'),
+                                   (st['sentences'], 'stat_sentences', 'accent'),
+                                   (st['mastered'], 'stat_mastered', 'success')):
+            c = Card(padding=[dp(8), dp(10)], spacing=dp(2), radius=dp(18))
+            c.add_widget(label(str(val), size=30, bold=True, color=colr, align='center',
+                               wrap=False, size_hint_y=1))
+            c.add_widget(label(tr(cap_key), size=13, color='sub', bold=True, align='center',
+                               wrap=False, size_hint_y=None, height=dp(24)))
+            stat_cards.append(c)
+        add_row(srow, stat_cards)
+        col.add_widget(srow)
 
-        def put(mode, asc):
-            app.store.set_setting('videos_sort', {'mode': mode, 'asc': asc})
-            self.rebuild()
-        sort_sheet(app, 'ترتيب الفيديوهات', ['name', 'duration', 'last_played', 'date', 'size'], get, put)
+        # --- continue learning ---------------------------------------------
+        nxt = self._next_level()
+        if nxt:
+            data = data_bank.get_level(nxt)
+            c = auto_card(padding=[dp(16), dp(14)], spacing=dp(8), radius=dp(22))
+            c.add_widget(label(tr('continue_learning'), size=13, color='sub', bold=True))
+            c.add_widget(label(tr('level_n', n=nxt) + ' — ' + level_title(nxt),
+                               size=19, bold=True))
+            m, t = db.level_mastery(nxt)
+            c.add_widget(BarProgress(value=m / float(t), height=dp(8)))
+            c.add_widget(button(tr('start_level'), lambda n=nxt: app.open_level(n), height=dp(46)))
+            col.add_widget(c)
 
-    # ---- item actions --------------------------------------------------------------------
-    def open_item(self, idx, item):
-        k = item.get('kind')
-        if k == 'create':
-            def ok(name):
-                # a playlist only exists once it has videos: pick them first
-                self.app.open_picker(None, new_name=name)
-            ask_text(self.app, 'قائمة تشغيل جديدة', '', 'اسم القائمة', ok, 'التالي')
-        elif k == 'gcreate':
-            new_group_flow(self.app, after=lambda gid: self.app.open_group(gid))
-        elif k == 'group':
-            self.app.open_group(item['coll'].id)
-        elif k == 'coll':
-            self.app.open_collection(item['coll'].id)
-        elif k == 'video':
-            keys = [i['key'] for i in self.vlist.items if i.get('kind') == 'video']
-            self.app.play(keys, keys.index(item['key']))
+        # --- quick actions ---------------------------------------------------
+        col.add_widget(section_title(tr('quick_actions')))
+        grid = GridLayout(cols=2, spacing=dp(10), size_hint_y=None, height=dp(2 * 62 + 10))
+        acts = [
+            ('mode_smart', 'replay', lambda: app.start_game({'mode': 'mixed', 'source': 'smart',
+                                                             'n': 10, 'title': 'mode_smart'})),
+            ('mode_flash', 'book', lambda: app.start_game({'mode': 'flash', 'source': 'bank',
+                                                           'n': 10})),
+            ('mode_daily', 'bolt', lambda: app.start_game({'mode': 'mixed', 'source': 'bank',
+                                                           'n': 10, 'title': 'mode_daily'})),
+            ('mode_mcq', 'check', lambda: app.pick_source('mcq')),
+        ]
+        if rtl.UI_RTL:
+            acts = [acts[1], acts[0], acts[3], acts[2]]
+        tint = {'mode_smart': FOLDER_COLORS[3], 'mode_flash': FOLDER_COLORS[0],
+                'mode_daily': FOLDER_COLORS[4], 'mode_mcq': FOLDER_COLORS[2]}
+        for key, icon, cb in acts:
+            inner = BoxLayout(orientation='horizontal', padding=[dp(10), 0], spacing=dp(10))
+            ic = centered(IconTile(icon, color=tint[key], size=dp(38)), (dp(38), dp(38)))
+            tl = label(tr(key), size=14, bold=True, autoheight=False, size_hint_y=1)
+            add_row(inner, [ic, tl])
+            tile = TapCard(padding=0, spacing=0, radius=dp(18))
+            tile.add_widget(inner)
+            tile.bind(on_release=lambda inst, cb=cb: cb())
+            grid.add_widget(tile)
+        col.add_widget(grid)
 
-    def _reorder(self, src, dst):
-        items = list(self.vlist.items)
-        if not (self.nav == 'library' and self.mode in ('playlists', 'groups')):
-            self.vlist.set_items(items)
-            return
-        dst = max(dst, 1 if items and items[0]['kind'] in ('create', 'gcreate') else 0)
-        it = items.pop(src)
-        items.insert(dst, it)
-        if self.mode == 'groups':
-            self.app.lib.set_groups_order([i['coll'].id for i in items if i['kind'] == 'group'])
-        else:
-            self.app.lib.set_collections_order([i['coll'].id for i in items if i['kind'] == 'coll'])
-        self.vlist.set_items(items)
+        # --- word of the day --------------------------------------------------
+        w = db.word_of_the_day()
+        c = auto_card(padding=[dp(16), dp(14)], spacing=dp(6), radius=dp(22))
+        c.add_widget(label(tr('word_of_day'), size=13, color='sub', bold=True))
+        top = BoxLayout(orientation='horizontal', size_hint_y=None, spacing=dp(8))
+        top.bind(minimum_height=top.setter('height'))
+        en = label(w['en'], size=26, bold=True, color='primary')
+        sp_btn = IconButton(name='speaker', color=C('primary'), size_hint=(None, None),
+                            size=(dp(46), dp(46)))
+        sp_btn.bind(on_release=lambda *_: app.speak(w['en']))
+        add_row(top, [en, sp_btn])
+        c.add_widget(top)
+        c.add_widget(label(w['ar'], size=21, bold=True))
+        c.add_widget(label(w['ex'], size=15, color='sub'))
+        c.add_widget(label(w['ex_ar'], size=14, color='sub'))
+        col.add_widget(c)
 
-    def _selected_videos(self):
-        lib = self.app.lib
-        if self.nav == 'history' or self.mode == 'videos':
-            return [k for k in self.ctx.selected if k in lib.videos]
-        keys, seen = [], set()
-        for cid in self.ctx.selected:                    # whole lists: every video once
-            c = lib.collection(cid)
-            if c:
-                for k in c.keys:
-                    if k not in seen:
-                        seen.add(k)
-                        keys.append(k)
-        return keys
+    def _next_level(self):
+        db = self.app.db
+        for lv in data_bank.group_ids('main') + data_bank.group_ids('extra'):
+            if db.is_level_unlocked(lv) and not db.level_info(lv)['passed']:
+                return lv
+        return None
 
-    def act_share(self):
-        share_keys(self.app, self._selected_videos())
 
-    def act_add(self):
-        keys = self._selected_videos()
-        if keys:
-            choose_playlist(self.app, keys, after=self.exit_selection)
+# ======================================================================
+# Folders
+# ======================================================================
+class FoldersScreen(BaseScreen):
+    def topbar_spec(self):
+        return (tr('nav_folders'), 'menu', [('plus', self.add_folder)])
 
-    def act_make_folder(self):
-        """The selected playlists (in the order they have on screen) go into a NEW folder or into one
-        of the folders that already exist."""
+    def build(self, col):
         app = self.app
-        lib = app.lib
-        ids = [c.id for c in lib.collections() if c.id in self.ctx.selected]
-        if not ids:
+        folders = app.db.list_folders()
+        if not folders:
+            c = auto_card(padding=[dp(18), dp(22)], spacing=dp(12), radius=dp(22))
+            ic = BoxLayout(size_hint_y=None, height=dp(76))
+            ic.add_widget(Widget())
+            ic.add_widget(IconTile('folder', color=FOLDER_COLORS[0], size=dp(72)))
+            ic.add_widget(Widget())
+            c.add_widget(ic)
+            c.add_widget(label(tr('no_folders_title'), size=20, bold=True, align='center'))
+            c.add_widget(label(tr('no_folders_text'), size=15, color='sub', align='center'))
+            c.add_widget(button(tr('create_folder'), self.add_folder))
+            c.add_widget(button(tr('add_sample'), self.add_sample, style='soft'))
+            col.add_widget(c)
             return
+        for f in folders:
+            col.add_widget(self._folder_card(f))
+        col.add_widget(button(tr('create_folder'), self.add_folder, style='ghost'))
 
-        def finish(msg):
-            app.store.save()
-            app.root.say(msg)
-            self.exit_selection()
-            app.root.refresh_pages()
+    def _folder_card(self, f):
+        app = self.app
+        card = TapCard(size_hint_y=None, height=dp(104), padding=[dp(12), dp(10)],
+                       spacing=dp(10), orientation='horizontal')
+        card.bind(on_release=lambda *_: app.open_folder(f['id']))
+        stripe = Widget(size_hint=(None, 1), width=dp(6))
+        with stripe.canvas:
+            Color(*FOLDER_COLORS[f['color'] % len(FOLDER_COLORS)])
+            r = RoundedRectangle(pos=stripe.pos, size=stripe.size, radius=[dp(3)])
+        stripe.bind(pos=lambda w, v: setattr(r, 'pos', v), size=lambda w, v: setattr(r, 'size', v))
+        info = BoxLayout(orientation='vertical', spacing=dp(4))
+        info.add_widget(label(f['name'], size=19, bold=True, wrap=False, size_hint_y=1))
+        total = f['words'] + f['sentences']
+        info.add_widget(label(tr('folder_counts', w=f['words'], s=f['sentences']), size=13,
+                              color='sub', wrap=False, size_hint_y=None, height=dp(22)))
+        info.add_widget(BarProgress(value=(f['mastered'] / float(total)) if total else 0,
+                                    fg=C('success'), height=dp(7)))
+        acts = BoxLayout(orientation='vertical', size_hint=(None, 1), width=dp(40),
+                         spacing=dp(8))
+        acts.add_widget(Widget())
+        e = TintButton('edit', C('primary'), box=dp(38))
+        e.bind(on_release=lambda *_: self.edit_folder(f))
+        d = TintButton('trash', C('danger'), box=dp(38))
+        d.bind(on_release=lambda *_: self.delete_folder(f))
+        acts.add_widget(e)
+        acts.add_widget(d)
+        acts.add_widget(Widget())
+        add_row(card, [stripe, info, acts])
+        return card
 
-        def new_folder():
-            def ok(name):
-                gid = lib.create_group(name, ids)
-                finish('تم إنشاء المجلد «%s» وفيه %d قائمة' % (lib.group(gid).name, len(ids)))
-            ask_text(app, 'مجلد جديد', '', 'اسم المجلد', ok, 'إنشاء')
+    # -- actions ---------------------------------------------------------
+    def add_sample(self):
+        fid = self.app.db.create_sample_folder(self.app.lang)
+        Toast.show(tr('sample_added'), 'ok')
+        self.refresh()
+        return fid
 
-        groups = lib.groups()
-        if not groups:
-            new_folder()
-            return
+    def add_folder(self):
+        self._folder_dialog(None)
 
-        def build():
-            rows = [SheetTitle('وضع القوائم في مجلد'),
-                    SheetRow('مجلد جديد', icon='folder_add', callback=lambda w: choose(None))]
-            for g in groups:
-                rows.append(SheetRow(g.name, icon='folder', value=core.count_lists_label(len(g.lists)),
-                                     callback=lambda w, gid=g.id: choose(gid)))
-            return rows
-        sheet = MenuSheet(app.root, build)
+    def edit_folder(self, f):
+        self._folder_dialog(f)
 
-        def choose(gid):
-            sheet.dismiss()
-            if gid is None:
-                new_folder()
-                return
-            n = lib.add_to_group(gid, ids)
-            nm = lib.group(gid).name
-            if n:
-                finish('تمت إضافة %d قائمة إلى المجلد «%s»' % (n, nm))
+    def _folder_dialog(self, f):
+        db = self.app.db
+        body = vbox(spacing=dp(12))
+        name = FormField(tr('folder_name'), hint=tr('folder_name_hint'),
+                         text=f['name'] if f else '')
+        body.add_widget(name)
+        body.add_widget(label(tr('folder_color'), size=13, color='sub', bold=True))
+        dots = ColorDots(FOLDER_COLORS, f['color'] if f else 0, dot=dp(34))
+        body.add_widget(dots)
+
+        def save():
+            if not name.text:
+                Toast.show(tr('err_name'), 'error')
+                return False
+            if f:
+                db.update_folder(f['id'], name.text, dots.selected)
             else:
-                finish('القوائم موجودة بالفعل في المجلد «%s»' % nm)
-        sheet.show()
+                db.add_folder(name.text, dots.selected)
+            self.refresh()
+            self.app.refresh_drawer()
+            return True
 
-    def act_rename(self):
-        sid = next(iter(self.ctx.selected))
-        lib = self.app.lib
+        Dialog(title=tr('edit_folder') if f else tr('new_folder'), body=body,
+               buttons=[(tr('cancel'), None, 'soft'), (tr('save'), save, 'primary')]).open()
 
-        def after():
-            self.app.store.save()
-            self.exit_selection()
-            self.rebuild()
-        if self.mode == 'groups' and self.nav == 'library':
-            g = lib.group(sid)
-            if g is None:
-                return
-
-            def ok_g(name):
-                lib.rename_group(sid, name)
-                after()
-            ask_text(self.app, 'تعديل اسم المجلد', g.name, 'اسم المجلد', ok_g)
-        elif self.mode == 'playlists' and self.nav == 'library':
-            c = lib.collection(sid)
-            if c is None:
-                return
-
-            def ok(name):
-                lib.rename_collection(sid, name)
-                after()
-            ask_text(self.app, 'تعديل اسم القائمة', c.name, 'اسم القائمة', ok)
-        else:
-            rename_video_dialog(self.app, sid, after)
-
-    def act_delete(self):
-        lib, app = self.app.lib, self.app
-        ids = list(self.ctx.selected)
-
-        def after():
-            app.store.save()
-            self.exit_selection()
-            self.rebuild()
-            app.root.refresh_pages()
-        if self.nav == 'history' or self.mode == 'videos':
-            delete_videos_dialog(app, ids, after)
-            return
-        if self.mode == 'groups':
-            def ok_g():
-                for gid in ids:
-                    lib.delete_group(gid)
-                app.root.say('تم حذف %d مجلد (القوائم والفيديوهات لم تُحذف)' % len(ids))
-                after()
-            confirm(app, 'حذف مجلدات',
-                    'سيتم حذف %d مجلد فقط. القوائم التي بداخلها والفيديوهات تبقى كما هي.' % len(ids),
-                    'حذف', ok_g)
-            return
-
-        def ok():
-            for cid in ids:
-                lib.delete_collection(cid)
-            app.root.say('تم حذف %d قائمة (الفيديوهات لم تُحذف من الجهاز)' % len(ids))
-            after()
-        confirm(app, 'حذف قوائم التشغيل',
-                'سيتم حذف %d قائمة من التطبيق فقط. الفيديوهات تبقى في الجهاز، '
-                'ويمكنك استعادة القوائم من الإعدادات.' % len(ids), 'حذف', ok)
+    def delete_folder(self, f):
+        def do():
+            self.app.db.delete_folder(f['id'])
+            Toast.show(tr('folder_deleted'), 'ok')
+            self.refresh()
+        confirm(tr('delete_folder'), tr('delete_folder_q', name=f['name']), do,
+                yes_text=tr('delete'), no_text=tr('cancel'), danger=True)
 
 
-# ---------------------------------------------------------------------------
-# Collection page (one playlist / folder)
-# ---------------------------------------------------------------------------
-class SettingsPage(Page):
-    """The options (what used to be the 'Me' tab), opened from the 3-dots button."""
+# ======================================================================
+# Folder detail
+# ======================================================================
+class ItemRow(BoxLayout):
+    """One word / sentence of a folder."""
+
+    def __init__(self, app, item, on_change, edit_cb, **kw):
+        super().__init__(orientation='vertical', size_hint_y=None, spacing=dp(4),
+                         padding=[dp(6), dp(6)], **kw)
+        self.bind(minimum_height=self.setter('height'))
+        self.app, self.item, self.on_change, self.edit_cb = app, item, on_change, edit_cb
+        word = item['kind'] == 'word'
+
+        top = BoxLayout(orientation='horizontal', size_hint_y=None, spacing=dp(6))
+        top.bind(minimum_height=top.setter('height'))
+        en = label(item['en'], size=21 if word else 17, bold=True)
+        if item['hl_main']:
+            en.hl = list(HIGHLIGHTS[item['hl_main']])
+        speak = IconButton(name='speaker', color=C('primary'), size_hint=(None, None),
+                           size=(dp(42), dp(42)))
+        speak.bind(on_release=lambda *_: app.speak(item['en']))
+        add_row(top, [en, speak])
+        self.add_widget(top)
+
+        ar = label(item['ar'], size=19 if word else 16, color='primary', bold=word)
+        self.add_widget(ar)
+        if item['ex']:
+            box = auto_card(bg_name='card2', padding=[dp(12), dp(8)], spacing=dp(3),
+                            radius=dp(12))
+            ex = label(item['ex'], size=15)
+            if item['hl_example']:
+                ex.hl = list(HIGHLIGHTS[item['hl_example']])
+            box.add_widget(ex)
+            if item['ex_ar']:
+                box.add_widget(label(item['ex_ar'], size=13, color='sub'))
+            self.add_widget(box)
+
+        acts = hbox(dp(40), spacing=dp(2))
+        star = IconButton(name='star', filled=bool(item['mastered']),
+                          color=C('accent') if item['mastered'] else C('sub'),
+                          size_hint=(None, 1), width=dp(40))
+        star.bind(on_release=lambda *_: self._toggle_master())
+        mark = IconButton(name='marker', color=C('sub'), size_hint=(None, 1), width=dp(40))
+        mark.bind(on_release=lambda *_: self._highlight())
+        edit_b = TintButton('edit', C('primary'), box=dp(34))
+        edit_b.bind(on_release=lambda *_: edit_cb(item))
+        trash_b = TintButton('trash', C('danger'), box=dp(34))
+        trash_b.bind(on_release=lambda *_: self._delete())
+        edit = centered(edit_b, (dp(38), dp(34)))
+        trash = centered(trash_b, (dp(38), dp(34)))
+        edit.width = trash.width = dp(38)
+        edit_b.size = trash_b.size = (dp(34), dp(34))
+        stats = label(tr('item_stats', c=item['correct'], w=item['wrong']), size=12, color='sub',
+                      wrap=False, size_hint_y=1)
+        add_row(acts, [stats, star, mark, edit, trash])
+        self.add_widget(acts)
+
+    def _toggle_master(self):
+        self.app.db.set_mastered(self.item['id'], not self.item['mastered'])
+        self.on_change()
+
+    def _delete(self):
+        def do():
+            self.app.db.delete_item(self.item['id'])
+            self.on_change()
+        confirm(tr('delete_item'), tr('delete_item_q', name=self.item['en']), do,
+                yes_text=tr('delete'), no_text=tr('cancel'), danger=True)
+
+    def _highlight(self):
+        item, db = self.item, self.app.db
+        body = vbox(spacing=dp(12))
+        target = {'v': 'main'}
+        if item['ex']:
+            seg = Segmented([('main', tr('hl_word') if item['kind'] == 'word' else tr('hl_sentence')),
+                             ('example', tr('hl_example'))], 'main',
+                            on_change=lambda v: target.update(v=v))
+            body.add_widget(seg)
+        body.add_widget(label(tr('hl_pick'), size=13, color='sub', bold=True))
+        dlg = {}
+
+        def pick(i):
+            db.set_highlight(item['id'], target['v'], i)
+            dlg['d'].dismiss()
+            self.on_change()
+
+        dots = ColorDots(HIGHLIGHTS, 0, on_change=pick, dot=dp(38))
+        body.add_widget(dots)
+        d = Dialog(title=tr('highlighter'), body=body, buttons=[(tr('close'), None, 'soft')])
+        dlg['d'] = d
+        d.open()
+
+
+class FolderScreen(BaseScreen):
+    PAGE = 40
 
     def __init__(self, app, **kw):
-        super(SettingsPage, self).__init__(app, **kw)
-        self.header = Header()
-        self.pane = SettingsPane(app, size_hint=(None, None))     # sized by _lay: below the header
-        self.add_widget(self.pane)
-        self.add_widget(self.header)
-        self.header.set('الإعدادات', '', [IconButton('back', callback=lambda w: self.app.root.back())], [])
-        self.bind(pos=self._lay, size=self._lay)
-        self._lay()
-
-    def _lay(self, *a):
-        hh = dp(60)
-        self.header.size = (self.width, hh)
-        self.header.pos = (self.x, (self.y + self.height) - hh)
-        self.pane.pos = self.pos
-        self.pane.size = (self.width, max(0, (self.y + self.height) - hh - self.y))
-
-    def refresh(self):
-        self.pane.build()
-
-
-class CollectionPage(Page, ListPageMixin):
-    def __init__(self, app, cid, **kw):
-        super(CollectionPage, self).__init__(app, **kw)
-        self.cid = cid
-        self.init_list()
-        self.ctx.reorder = True          # long press + move = reorder (always possible)
-        self.vlist.reorderable = True
-        self.header = Header()
+        super().__init__(app, **kw)
+        self.filter = 'all'
         self.query = ''
-        self.search_on = False
-        self.field = None
-        self.empty = EmptyState('playlist')
-        for w in (self.vlist, self.header, self.empty):
-            self.add_widget(w)
-        self.btn_back = IconButton('back', callback=lambda w: self.app.root.back())
-        self.btn_close = IconButton('close', callback=lambda w: self.exit_selection())
-        self.btn_sort = IconButton('sort', callback=lambda w: self.open_sort())
-        self.btn_search = IconButton('search', callback=lambda w: self.toggle_search(True))
-        self.btn_add = IconButton('plus', callback=lambda w: self.add_videos())
-        self.bind(pos=self._lay, size=self._lay)
-        self._lay()
+        self.limit = self.PAGE
 
-    @property
-    def coll(self):
-        return self.app.lib.collection(self.cid)
+    def topbar_spec(self):
+        f = self.app.db.get_folder(self.app.current_folder_id)
+        return (f['name'] if f else '', 'back', [('plus', self.add_item)])
 
-    def _lay(self, *a):
-        hh = dp(64)
-        self.header.size = (self.width, hh)
-        self.header.pos = (self.x, (self.y + self.height) - hh)
-        self.vlist.pos = self.pos
-        self.vlist.size = (self.width, max(0, (self.y + self.height) - hh - self.y))
-        self.empty.pos = (self.x + dp(30), self.vlist.y + self.vlist.height * 0.4)
-        self.empty.size = (self.width - dp(60), dp(80))
+    def on_pre_enter(self, *a):
+        self.filter, self.query, self.limit = 'all', '', self.PAGE
+        super().on_pre_enter(*a)
 
-    def on_show(self):
-        self.refresh()
-
-    def on_resume(self):
-        self.refresh()
-
-    def on_back(self):
-        if self.ctx.sel_mode:
-            self.exit_selection()
-            return True
-        if self.search_on:
-            self.toggle_search(False)
-            return True
-        return False
-
-    def refresh(self):
-        c = self.coll
-        if c is None:
-            Clock.schedule_once(lambda dt: self.app.root.pop(), 0)
+    def build(self, col):
+        app, db = self.app, self.app.db
+        fid = app.current_folder_id
+        f = db.get_folder(fid)
+        if not f:
             return
-        keys = c.keys
-        if self.query:
-            keys = [k for k in keys if self.query.casefold() in self.app.lib.title(k).casefold()]
-        self.vlist.reorderable = bool(self.ctx.sel_mode and not self.query)
-        self.vlist.set_items([{'kind': 'video', 'key': k} for k in keys])
-        if not keys:
-            self.empty.ltext = 'القائمة فارغة.\nاضغط + لإضافة فيديوهات.' if not self.query \
-                else 'لا توجد فيديوهات'
+        items_all = db.get_all_user_items(fid)
+        words = sum(1 for i in items_all if i['kind'] == 'word')
+        sents = len(items_all) - words
+        mast = sum(1 for i in items_all if i['mastered'])
+
+        head = auto_card(padding=[dp(16), dp(14)], spacing=dp(8), radius=dp(22))
+        head.add_widget(label(tr('folder_counts', w=words, s=sents), size=15, bold=True))
+        total = len(items_all)
+        head.add_widget(BarProgress(value=(mast / float(total)) if total else 0,
+                                    fg=C('success'), height=dp(8)))
+        head.add_widget(label(tr('mastered_n', a=mast, b=total), size=13, color='sub'))
+        head.add_widget(button(tr('practice'), self.practice, height=dp(46)))
+        col.add_widget(head)
+
+        self.seg = Segmented([('all', tr('f_all')), ('word', tr('f_words')),
+                              ('sentence', tr('f_sentences')), ('mastered', tr('f_mastered'))],
+                             self.filter, on_change=self._set_filter, size=13)
+        col.add_widget(self.seg)
+        self.search = ATextInput(hint=tr('search'), text=self.query, height=dp(46))
+        self.search.bind(text=self._on_search)
+        col.add_widget(self.search)
+
+        self.list_card = auto_card(padding=[dp(10), dp(6)], spacing=0, radius=dp(20))
+        col.add_widget(self.list_card)
+        self._fill_list()
+
+    def _set_filter(self, v):
+        self.filter = v
+        self.limit = self.PAGE
+        self._fill_list()
+
+    def _on_search(self, inst, text):
+        self.query = text
+        self.limit = self.PAGE
+        self._fill_list()
+
+    def _fill_list(self):
+        app, db = self.app, self.app.db
+        lc = self.list_card
+        lc.clear_widgets()
+        kind = self.filter if self.filter in ('word', 'sentence') else None
+        items = db.get_items(app.current_folder_id, kind=kind, search=self.query or None,
+                             mastered_only=(self.filter == 'mastered'))
+        if not items:
+            lc.add_widget(label(tr('no_items_here'), size=15, color='sub', align='center',
+                                padding=[0, dp(16)]))
+            return
+        shown = items[:self.limit]
+        for i, it in enumerate(shown):
+            lc.add_widget(ItemRow(app, it, self._changed, self.edit_item))
+            if i < len(shown) - 1:
+                lc.add_widget(make_divider(app))
+        if len(items) > self.limit:
+            def more():
+                self.limit += self.PAGE
+                self._fill_list()
+            lc.add_widget(button(tr('show_more', n=len(items) - self.limit), more, style='soft',
+                                 height=dp(44)))
+
+    def _changed(self):
+        keep = self.sv.scroll_y
+        self.refresh()
+        self.sv.scroll_y = keep
+
+    # -- add / edit ----------------------------------------------------------
+    def add_item(self):
+        self._item_dialog(None)
+
+    def edit_item(self, item):
+        self._item_dialog(item)
+
+    def _item_dialog(self, item):
+        db = self.app.db
+        body = vbox(spacing=dp(10))
+        kind = {'v': item['kind'] if item else 'word'}
+        seg = Segmented([('word', tr('kind_word')), ('sentence', tr('kind_sentence'))], kind['v'],
+                        on_change=lambda v: set_kind(v))
+        body.add_widget(seg)
+        f_en = FormField(tr('word_en'), hint='apple', text=item['en'] if item else '', vk_lang='en')
+        f_ar = FormField(tr('word_ar'), hint=tr('word_ar_hint'), text=item['ar'] if item else '', vk_lang='ar')
+        ex_box = vbox(spacing=dp(10))
+        f_ex = FormField(tr('example_en'), hint='I eat an apple.', text=item['ex'] if item else '', vk_lang='en')
+        f_exar = FormField(tr('example_ar'), hint=tr('example_ar_hint'),
+                           text=item['ex_ar'] if item else '', vk_lang='ar')
+        ex_box.add_widget(f_ex)
+        ex_box.add_widget(f_exar)
+        body.add_widget(f_en)
+        body.add_widget(f_ar)
+
+        def set_kind(v):
+            kind['v'] = v
+            f_en.caption.raw = tr('word_en') if v == 'word' else tr('sentence_en')
+            f_ar.caption.raw = tr('word_ar') if v == 'word' else tr('sentence_ar')
+            if v == 'word' and ex_box.parent is None:
+                body.add_widget(ex_box)
+            elif v == 'sentence' and ex_box.parent is not None:
+                body.remove_widget(ex_box)
+
+        if kind['v'] == 'word':
+            body.add_widget(ex_box)
         else:
-            self.empty.ltext = ''
-        self.update_header()
+            set_kind('sentence')
 
-    def update_header(self):
-        c = self.coll
-        if c is None:
-            return
-        if self.ctx.sel_mode:
-            n = len(self.ctx.selected)
-            left = [IconButton('select_all', callback=lambda w: self.select_all()),
-                    IconButton('share', callback=lambda w: self.act_share()),
-                    IconButton('playlist_add', callback=lambda w: self.act_add())]
-            left.append(IconButton('trash', color=DANGER, callback=lambda w: self.act_delete()))
-            left.append(IconButton('dots', callback=lambda w: self.more_menu()))
-            self.header.set('%d محدد' % n, '', [self.btn_close], left, short=str(n))
-            return
-        if self.search_on:
-            self.header.set('', '', [IconButton('close', callback=lambda w: self.toggle_search(False))], [],
-                            extra=self.field)
-            return
-        sub = core.count_videos_label(c.count)
-        total = self.app.lib.total_duration(c.keys)
-        if total:
-            sub += '  •  ' + core.fmt_time(total)
-        left = [self.btn_add, self.btn_search, self.btn_sort]
-        self.header.set(c.name, sub, [self.btn_back], left)
-
-    def on_selection_changed(self):
-        self.vlist.reorderable = bool(self.ctx.sel_mode and not self.query)
-        self.update_header()
-        self.vlist.refresh()
-
-    # ---- search / sort ----------------------------------------------------------------------
-    def toggle_search(self, on):
-        if on:
-            self.field = FieldInput(text='', hint='بحث…')
-            self.field.size_hint = (None, None)
-            self.field.height = dp(44)
-            self.field.ti.bind(text=self._on_query)
-            self.search_on = True
-            self.update_header()
-            Clock.schedule_once(self._focus_field, 0.15)
-        else:
-            if self.field is not None:
-                self.field.release()
-            self.search_on = False
-            self.field = None
-            self.query = ''
-            self.refresh()
-
-    def _focus_field(self, dt):
-        if self.field is not None and self.search_on:
-            self.field.focus()
-
-    def _on_query(self, inst, value):
-        self.query = value
-        self.refresh()
-
-    def open_sort(self):
-        lib = self.app.lib
-
-        def get():
-            return lib.collection_sort(self.cid)
-
-        def put(mode, asc):
-            if mode == 'manual' and lib.collection_sort(self.cid)[0] != 'manual':
-                # keep the current visual order as the manual order
-                lib.set_manual_order(self.cid, lib.items(self.cid))
+        def save():
+            if not f_en.text or not f_ar.text:
+                Toast.show(tr('err_fields'), 'error')
+                return False
+            ex, exar = (f_ex.text, f_exar.text) if kind['v'] == 'word' else ('', '')
+            if item:
+                db.update_item(item['id'], kind['v'], f_en.text, f_ar.text, ex, exar)
             else:
-                lib.set_collection_sort(self.cid, mode, asc)
-            self.app.store.save()
-            self.refresh()
-        sort_sheet(self.app, 'ترتيب القائمة', core.SORT_MODES, get, put)
+                db.add_item(self.app.current_folder_id, kind['v'], f_en.text, f_ar.text, ex, exar)
+            self._changed()
+            return True
 
-    # ---- items --------------------------------------------------------------------------------
-    def open_item(self, idx, item):
-        keys = [i['key'] for i in self.vlist.items]
-        self.app.play(keys, keys.index(item['key']), cid=self.cid)
+        Dialog(title=tr('edit_item') if item else tr('new_item'), body=body,
+               buttons=[(tr('cancel'), None, 'soft'), (tr('save'), save, 'primary')]).open()
 
-    def _reorder(self, src, dst):
-        items = list(self.vlist.items)
-        it = items.pop(src)
-        items.insert(dst, it)
-        keys = [i['key'] for i in items]
-        was_manual = self.app.lib.collection_sort(self.cid)[0] == 'manual'
-        self.app.lib.set_manual_order(self.cid, keys)
-        self.app.store.save()
-        self.vlist.set_items(items)
-        if not was_manual:
-            self.app.root.say('تم التحويل إلى الترتيب اليدوي')
-            self.update_header()
+    def practice(self):
+        self.app.pick_game_for_folder(self.app.current_folder_id)
 
-    def add_videos(self):
-        self.app.open_picker(self.cid)
 
-    def act_add(self):
-        keys = selection_keys(self.ctx, self.app.lib)
-        choose_playlist(self.app, keys, after=self.exit_selection)
+# ======================================================================
+# Levels
+# ======================================================================
+LEVEL_QUESTIONS = 20
 
-    def act_share(self):
-        share_keys(self.app, selection_keys(self.ctx, self.app.lib))
 
-    def act_rename(self):
-        sid = next(iter(self.ctx.selected))
+def level_title(n):
+    lv = data_bank.get_level(n)
+    if not lv:
+        return str(n)
+    return lv['title_ar'] if rtl.UI_RTL else lv['title_en']
 
-        def after():
-            self.app.store.save()
-            self.exit_selection()
-            self.refresh()
-        rename_video_dialog(self.app, sid, after)
 
-    def act_delete(self):
-        keys = selection_keys(self.ctx, self.app.lib)
+_level_label = level_title
 
-        def after():
-            self.exit_selection()
-            self.app.root.refresh_pages()
-        delete_videos_dialog(self.app, keys, after)
 
-    def more_menu(self):
-        lib, app = self.app.lib, self.app
+def level_cfg(n):
+    """One tap = a random mixed quiz over this level (all question types)."""
+    return {'source': 'bank', 'levels': [n], 'mode': 'mixed', 'n': LEVEL_QUESTIONS,
+            'level_test': n, 'title': 'mode_test'}
 
-        def build():
-            rows = [SheetTitle('المزيد'),
-                    SheetRow('تشغيل المحدد', icon='play', callback=lambda w: do('play'))]
-            if len(self.ctx.selected) == 1:
-                rows.append(SheetRow('تعديل الاسم', icon='edit', callback=lambda w: (sheet.dismiss(), self.act_rename())))
-            return rows + [
-                    SheetRow('نقل إلى أول القائمة', icon='move_top', callback=lambda w: do('top')),
-                    SheetRow('نقل إلى آخر القائمة', icon='move_bottom', callback=lambda w: do('bottom')),
-                    SheetRow('إزالة من القائمة فقط', icon='close', callback=lambda w: do('remove'))]
-        sheet = MenuSheet(app.root, build)
 
-        def do(what):
-            sheet.dismiss()
-            keys = [i['key'] for i in self.vlist.items if i['key'] in self.ctx.selected]
-            if what == 'play':
-                self.exit_selection()
-                app.play(keys, 0, cid=self.cid)
-                return
-            if what in ('top', 'bottom'):
-                lib.move_to_edge(self.cid, keys, top=(what == 'top'))
+class LevelsScreen(BaseScreen):
+    def topbar_spec(self):
+        return (tr('nav_levels'), 'menu', [])
+
+    def build(self, col):
+        col.add_widget(label(tr('levels_intro', p=PASS_SCORE), size=14, color='sub'))
+        for group, title_key, hint_key in (('main', 'track_main', 'track_main_d'),
+                                           ('extra', 'track_extra', 'track_extra_d')):
+            col.add_widget(section_title(tr(title_key)))
+            col.add_widget(label(tr(hint_key), size=13, color='sub'))
+            for lv in data_bank.LEVELS:
+                if lv['group'] == group:
+                    col.add_widget(self._level_card(lv))
+
+    def _level_card(self, lv):
+        app, db = self.app, self.app.db
+        n = lv['id']
+        unlocked = db.is_level_unlocked(n)
+        info = db.level_info(n)
+        m, t = db.level_mastery(n)
+        card = TapCard(size_hint_y=None, height=dp(88), padding=[dp(12), dp(10)],
+                       spacing=dp(10), orientation='horizontal')
+        card.bind(on_release=lambda *_: self._tapped(n, unlocked))
+        badge = Badge(FOLDER_COLORS[(n - 1) % len(FOLDER_COLORS)] if unlocked else C('card2'),
+                      raw=str(n), font_size=sp(20), color=(1, 1, 1, 1) if unlocked else C('sub'))
+        mid = BoxLayout(orientation='vertical', spacing=dp(4))
+        mid.add_widget(label(level_title(n), size=16, bold=True, size_hint_y=1,
+                             autoheight=False, color='text' if unlocked else 'sub'))
+        mid.add_widget(BarProgress(value=m / float(t), fg=C('success'), height=dp(7)))
+        sub = tr('level_progress', a=m, b=t)
+        if info['passed']:
+            sub += '  •  %d%%' % info['best_score']
+        mid.add_widget(label(sub, size=12, color='sub', wrap=False,
+                             size_hint_y=None, height=dp(20)))
+        right = BoxLayout(orientation='horizontal', size_hint=(None, 1), width=dp(84),
+                          spacing=dp(2))
+        if not unlocked:
+            right.add_widget(Widget())
+            right.add_widget(centered(Icon(name='lock', color=C('sub')), (dp(24), dp(24))))
+        else:
+            words = IconButton(name='book', color=C('sub'), size_hint=(None, 1), width=dp(40))
+            words.bind(on_release=lambda *_: self._words(n))
+            right.add_widget(words)
+            if info['passed']:
+                right.add_widget(centered(Icon(name='star', filled=True, color=C('accent')),
+                                          (dp(26), dp(26))))
             else:
-                lib.remove_from_collection(self.cid, keys)
-                app.root.say('تمت الإزالة من القائمة (الملفات باقية في الجهاز)')
-            app.store.save()
-            self.exit_selection()
-            app.root.refresh_pages()
-        sheet.show()
+                right.add_widget(centered(Icon(name='play', color=C('primary')),
+                                          (dp(26), dp(26))))
+        add_row(card, [badge, mid, right])
+        return card
 
-
-class GroupPage(Page, ListPageMixin):
-    """One folder ("مجلد"): the lists that were put together under a name chosen by the user."""
-
-    def __init__(self, app, cid, **kw):
-        super(GroupPage, self).__init__(app, **kw)
-        self.cid = cid
-        self.init_list()
-        self.ctx.reorder = True          # long press + move = reorder the lists
-        self.vlist.reorderable = True
-        self.header = Header()
-        self.empty = EmptyState('folder')
-        for w in (self.vlist, self.header, self.empty):
-            self.add_widget(w)
-        self.btn_back = IconButton('back', callback=lambda w: self.app.root.back())
-        self.btn_close = IconButton('close', callback=lambda w: self.exit_selection())
-        self.btn_add = IconButton('plus', callback=lambda w: self.add_lists())
-        self.btn_menu = IconButton('dots', callback=lambda w: self.more_menu())
-        self.bind(pos=self._lay, size=self._lay)
-        self._lay()
-
-    @property
-    def group(self):
-        return self.app.lib.group(self.cid)
-
-    def _lay(self, *a):
-        hh = dp(64)
-        self.header.size = (self.width, hh)
-        self.header.pos = (self.x, (self.y + self.height) - hh)
-        self.vlist.pos = self.pos
-        self.vlist.size = (self.width, max(0, (self.y + self.height) - hh - self.y))
-        self.empty.pos = (self.x + dp(30), self.vlist.y + self.vlist.height * 0.4)
-        self.empty.size = (self.width - dp(60), dp(80))
-
-    def on_show(self):
-        self.refresh()
-
-    def on_resume(self):
-        self.refresh()
-
-    def on_back(self):
-        if self.ctx.sel_mode:
-            self.exit_selection()
-            return True
-        return False
-
-    def refresh(self):
-        g = self.group
-        if g is None:
-            Clock.schedule_once(lambda dt: self.app.root.pop(), 0)
+    def _tapped(self, n, unlocked):
+        if not unlocked:
+            prev = data_bank.prev_in_group(n)
+            Toast.show(tr('level_locked', n=level_title(prev), p=PASS_SCORE), 'warn')
             return
-        self.vlist.reorderable = bool(self.ctx.sel_mode)
-        self.vlist.set_items([{'kind': 'coll', 'coll': c} for c in g.lists])
-        self.empty.ltext = '' if g.lists else 'المجلد فارغ.\nاضغط + لإضافة قوائم تشغيل.'
-        self.update_header()
+        self.app.open_level(n)
 
-    def update_header(self):
-        g = self.group
-        if g is None:
+    def _words(self, n):
+        WordsSheet(self.app, n).open()
+
+
+class WordsSheet:
+    """The words of one level (with speaker) + 'add to my folders'."""
+
+    def __init__(self, app, n):
+        self.app, self.n = app, n
+        items = app.db.bank_items([n], ('word',))
+        body = vbox(spacing=dp(2))
+        for it in items:
+            row = BoxLayout(orientation='horizontal', size_hint_y=None, spacing=dp(6))
+            row.bind(minimum_height=row.setter('height'))
+            col = vbox(spacing=dp(1))
+            col.add_widget(label(it['en'], size=16, bold=True))
+            col.add_widget(label(it['ar'], size=15, color='primary'))
+            sp_btn = IconButton(name='speaker', color=C('sub'), size_hint=(None, None),
+                                size=(dp(38), dp(38)))
+            sp_btn.bind(on_release=lambda inst, t=it['en']: self.app.speak(t))
+            add_row(row, [col, sp_btn])
+            body.add_widget(row)
+            body.add_widget(Divider(style='solid', color=C('divider'), thickness=1, height=dp(8)))
+        self.dlg = Dialog(title=tr('level_n', n=n) + ' — ' + level_title(n), body=body,
+                          buttons=[(tr('copy_level_short'), self._copy, 'soft'),
+                                   (tr('close'), None, 'primary')],
+                          body_max=Window.height * 0.62)
+
+    def open(self):
+        self.dlg.open()
+
+    def _copy(self):
+        name = tr('level_n', n=self.n) + ' - ' + level_title(self.n)
+        self.app.db.copy_level_to_folder(self.n, name)
+        Toast.show(tr('level_copied'), 'ok')
+        self.app.refresh_drawer()
+        return True
+
+
+# ======================================================================
+# Challenges
+# ======================================================================
+CHALLENGES = [
+    # key, icon, needs source dialog, base cfg
+    ('mode_daily', 'bolt', True, {'mode': 'mixed', 'n': 10, 'title': 'mode_daily'}),
+    ('mode_speed', 'play', True, {'mode': 'speed', 'time': 60, 'title': 'mode_speed'}),
+    ('mode_survival', 'star', True, {'mode': 'survival', 'title': 'mode_survival'}),
+    ('mode_match', 'levels', True, {'mode': 'match', 'n': 10}),
+    ('mode_spell', 'edit', True, {'mode': 'spell', 'n': 8}),
+    ('mode_rev', 'replay', True, {'mode': 'rev', 'n': 10}),
+    ('mode_mcq', 'check', True, {'mode': 'mcq', 'n': 10}),
+    ('mode_flash', 'book', True, {'mode': 'flash', 'n': 10}),
+    ('mode_smart', 'star', False, {'mode': 'mixed', 'source': 'smart', 'n': 10,
+                                   'title': 'mode_smart'}),
+]
+
+
+CHALLENGE_COLORS = {
+    'mode_daily': FOLDER_COLORS[4], 'mode_speed': FOLDER_COLORS[1],
+    'mode_survival': FOLDER_COLORS[6], 'mode_match': FOLDER_COLORS[3],
+    'mode_spell': FOLDER_COLORS[5], 'mode_rev': FOLDER_COLORS[2],
+    'mode_mcq': FOLDER_COLORS[0], 'mode_flash': FOLDER_COLORS[7],
+    'mode_smart': FOLDER_COLORS[3],
+}
+
+
+class ChallengesScreen(BaseScreen):
+    def topbar_spec(self):
+        return (tr('nav_challenges'), 'menu', [])
+
+    def build(self, col):
+        app = self.app
+        col.add_widget(label(tr('challenges_intro'), size=14, color='sub'))
+        best_s = app.db.get_int('best_speed', 0)
+        best_v = app.db.get_int('best_survival', 0)
+        for key, icon, needs, cfg in CHALLENGES:
+            card = TapCard(size_hint_y=None, height=dp(88), padding=[dp(14), dp(10)],
+                           spacing=dp(14), orientation='horizontal')
+            tile = centered(IconTile(icon, color=CHALLENGE_COLORS.get(key)), (dp(48), dp(48)))
+            col_info = BoxLayout(orientation='vertical', spacing=dp(2))
+            col_info.add_widget(label(tr(key), size=18, bold=True, wrap=False, size_hint_y=1))
+            desc = tr(key + '_d')
+            if key == 'mode_speed' and best_s:
+                desc += '  •  ' + tr('best_n', n=best_s)
+            if key == 'mode_survival' and best_v:
+                desc += '  •  ' + tr('best_n', n=best_v)
+            col_info.add_widget(label(desc, size=13, color='sub'))
+            chev = centered(Icon(name='chevron', color=C('sub'), mirror=rtl.UI_RTL),
+                            (dp(22), dp(22)))
+            add_row(card, [tile, col_info, chev])
+            card.bind(on_release=lambda inst, key=key, needs=needs, cfg=cfg: self._go(key, needs, cfg))
+            col.add_widget(card)
+
+    def _go(self, key, needs, cfg):
+        app = self.app
+        if not needs:
+            app.start_game(dict(cfg))
             return
-        if self.ctx.sel_mode:
-            n = len(self.ctx.selected)
-            left = [IconButton('select_all', callback=lambda w: self.select_all()),
-                    IconButton('share', callback=lambda w: self.act_share()),
-                    IconButton('trash', color=DANGER, callback=lambda w: self.act_remove())]
-            self.header.set('%d محدد' % n, '', [self.btn_close], left, short=str(n))
-            return
-        sub = core.count_lists_label(len(g.lists)) + '  •  ' + core.count_videos_label(g.count)
-        self.header.set(g.name, sub, [self.btn_back], [self.btn_menu, self.btn_add])
-
-    def on_selection_changed(self):
-        self.vlist.reorderable = bool(self.ctx.sel_mode)
-        self.update_header()
-        self.vlist.refresh()
-
-    def open_item(self, idx, item):
-        self.app.open_collection(item['coll'].id)
-
-    def _reorder(self, src, dst):
-        items = list(self.vlist.items)
-        it = items.pop(src)
-        items.insert(dst, it)
-        self.app.lib.set_group_order(self.cid, [i['coll'].id for i in items])
-        self.app.store.save()
-        self.vlist.set_items(items)
-
-    def add_lists(self):
-        lib, app = self.app.lib, self.app
-        g = self.group
-        have = set(c.id for c in g.lists) if g else set()
-        cands = [c for c in lib.collections() if c.id not in have]
-        if not cands:
-            app.root.say('كل القوائم موجودة بالفعل في هذا المجلد')
-            return
-
-        def done(cids):
-            n = lib.add_to_group(self.cid, cids)
-            app.store.save()
-            app.root.say('تمت إضافة %d قائمة' % n)
-            self.refresh()
-            app.root.refresh_pages()
-        pick_lists(app, 'إضافة قوائم إلى المجلد', cands, 'إضافة', done)
-
-    def act_share(self):
-        lib = self.app.lib
-        keys, seen = [], set()
-        for cid in self.ctx.selected:
-            c = lib.collection(cid)
-            for k in (c.keys if c else []):
-                if k not in seen:
-                    seen.add(k)
-                    keys.append(k)
-        share_keys(self.app, keys)
-
-    def act_remove(self):
-        ids = list(self.ctx.selected)
-        lib, app = self.app.lib, self.app
-
-        def ok():
-            lib.remove_from_group(self.cid, ids)
-            app.store.save()
-            app.root.say('تمت الإزالة من المجلد (القوائم لم تُحذف)')
-            self.exit_selection()
-            self.refresh()
-            app.root.refresh_pages()
-        confirm(app, 'إزالة من المجلد',
-                'سيتم إخراج %d قائمة من هذا المجلد فقط. القوائم والفيديوهات تبقى كما هي.' % len(ids),
-                'إزالة', ok)
-
-    def more_menu(self):
-        lib, app = self.app.lib, self.app
-
-        def build():
-            return [SheetTitle('المجلد'),
-                    SheetRow('إضافة قوائم', icon='plus', callback=lambda w: (sheet.dismiss(), self.add_lists())),
-                    SheetRow('تعديل الاسم', icon='edit', callback=lambda w: (sheet.dismiss(), rename())),
-                    SheetRow('حذف المجلد', icon='trash', danger=True,
-                             callback=lambda w: (sheet.dismiss(), delete()))]
-        sheet = MenuSheet(app.root, build)
-
-        def rename():
-            g = self.group
-            if g is None:
-                return
-
-            def ok(name):
-                lib.rename_group(self.cid, name)
-                app.store.save()
-                self.refresh()
-                app.root.refresh_pages()
-            ask_text(app, 'تعديل اسم المجلد', g.name, 'اسم المجلد', ok)
-
-        def delete():
-            def ok():
-                lib.delete_group(self.cid)
-                app.store.save()
-                app.root.say('تم حذف المجلد (القوائم لم تُحذف)')
-                app.root.pop()
-                app.root.refresh_pages()
-            confirm(app, 'حذف المجلد',
-                    'سيتم حذف المجلد فقط. القوائم التي بداخله والفيديوهات تبقى كما هي.', 'حذف', ok)
-        sheet.show()
+        app.pick_source(cfg['mode'], base=dict(cfg))
 
 
-# ---------------------------------------------------------------------------
-# Picker: choose videos to add into a custom playlist
-# ---------------------------------------------------------------------------
-class PickerPage(Page, ListPageMixin):
-    """Tick videos.  With a cid they are added to that list; with new_name (and no cid) they
-    become a NEW playlist - which is only created when at least one video is ticked."""
+# ======================================================================
+# Source picker + game picker dialogs
+# ======================================================================
+def source_dialog(app, mode, base=None, on_start=None):
+    """Ask where the questions come from (system words / my words)."""
+    db = app.db
+    base = dict(base or {'mode': mode, 'n': 10})
+    base['mode'] = mode
+    state = {'source': 'bank', 'level': 0, 'folder': 0, 'kinds': 'both'}
+    if not db.list_folders() and not db.get_all_user_items():
+        pass
+    body = vbox(spacing=dp(12))
+    seg = Segmented([('bank', tr('src_system')), ('user', tr('src_mine'))], 'bank',
+                    on_change=lambda v: (state.update(source=v), render()))
+    body.add_widget(seg)
+    dyn = vbox(spacing=dp(10))
+    body.add_widget(dyn)
+    kinds_box = vbox(spacing=dp(6))
+    body.add_widget(kinds_box)
 
-    def __init__(self, app, cid, new_name=None, **kw):
-        super(PickerPage, self).__init__(app, **kw)
-        self.cid = cid
-        self.new_name = new_name
-        self.query = ''
-        self.search_on = False
-        self.field = None
-        self.all_keys = []
-        self.init_list()
-        self.ctx.sel_mode = True
-        self.ctx.reorder = False
-        self.header = Header()
-        for w in (self.vlist, self.header):
-            self.add_widget(w)
-        self.btn_close = IconButton('close', callback=lambda w: self.app.root.back())
-        self.btn_ok = IconButton('check', color=ACCENT, callback=lambda w: self.confirm())
-        self.btn_all = IconButton('select_all', callback=lambda w: self.select_all())
-        self.btn_search = IconButton('search', callback=lambda w: self.toggle_search(True))
-        self.bind(pos=self._lay, size=self._lay)
-        self._lay()
-        self.refresh()
-
-    def _lay(self, *a):
-        hh = dp(60)
-        self.header.size = (self.width, hh)
-        self.header.pos = (self.x, (self.y + self.height) - hh)
-        self.vlist.pos = self.pos
-        self.vlist.size = (self.width, max(0, (self.y + self.height) - hh - self.y))
-
-    def _match(self, text):
-        q = self.query.strip()
-        if not q:
-            return True
-        return core.natural_key(q) == core.natural_key(text) or \
-            q.casefold() in (text or '').casefold()
-
-    def refresh(self):
-        lib = self.app.lib
-        existing = set(lib.items(self.cid)) if self.cid else set()
-        self.all_keys = [k for k in lib.all_videos_sorted() if k not in existing]
-        keys = [k for k in self.all_keys if self._match(lib.title(k))]
-        self.vlist.set_items([{'kind': 'video', 'key': k} for k in keys])
-        self.update_header()
-
-    def update_header(self):
-        if self.search_on:
-            self.header.set('', '', [IconButton('close', callback=lambda w: self.toggle_search(False))], [],
-                            extra=self.field)
-            return
-        n = len(self.ctx.selected)
-        title = ('«%s»  •  %d' % (self.new_name, n)) if self.new_name else 'اختر الفيديوهات (%d)' % n
-        self.header.set(title, 'اختر فيديو واحد على الأقل' if self.new_name else '', [self.btn_close],
-                        [self.btn_ok, self.btn_all, self.btn_search], short=str(n))
-
-    # ---- search ----------------------------------------------------------------------
-    def toggle_search(self, on):
-        if on:
-            self.field = FieldInput(text='', hint='ابحث عن فيديو…')
-            self.field.size_hint = (None, None)
-            self.field.height = dp(44)
-            self.field.ti.bind(text=self._on_query)
-            self.search_on = True
-            self.update_header()
-            Clock.schedule_once(self._focus_field, 0.15)
+    def render():
+        dyn.clear_widgets()
+        if state['source'] == 'bank':
+            dyn.add_widget(label(tr('src_system_hint'), size=13, color='sub'))
+            opts = [(0, tr('progressive'))] + [(n, tr('level_short', n=n))
+                                               for n in data_bank.level_ids()
+                                               if db.is_level_unlocked(n)]
+            dyn.add_widget(chips(opts, state['level'], lambda v: state.update(level=v), cols=3,
+                                 size=13))
         else:
-            if self.field is not None:
-                self.field.release()
-            self.search_on = False
-            self.field = None
-            self.query = ''
-            self.refresh()
+            folders = db.list_folders()
+            if not folders:
+                dyn.add_widget(label(tr('src_no_folders'), size=14, color='warn', bold=True))
+            else:
+                opts = [(0, tr('all_my_words'))] + [(f['id'], f['name']) for f in folders]
+                dyn.add_widget(label(tr('src_pick_folder'), size=13, color='sub'))
+                dyn.add_widget(chips(opts, state['folder'], lambda v: state.update(folder=v),
+                                     cols=2, size=13))
 
-    def _focus_field(self, dt):
-        if self.field is not None and self.search_on:
-            self.field.focus()
+    render()
+    if mode not in ('spell', 'match'):
+        kinds_box.add_widget(label(tr('content'), size=13, color='sub', bold=True))
+        kinds_box.add_widget(Segmented([('both', tr('k_both')), ('word', tr('k_words')),
+                                        ('sentence', tr('k_sentences'))], 'both',
+                                       on_change=lambda v: state.update(kinds=v), size=13))
 
-    def _on_query(self, inst, value):
-        self.query = value
-        self.refresh()
-
-    def on_back(self):
-        if self.search_on:
-            self.toggle_search(False)
-            return True
-        return False
-
-    def on_selection_changed(self):
-        self.update_header()
-
-    def _tap(self, idx, item, x):
-        sid = item.get('key')
-        if sid in self.ctx.selected:
-            self.ctx.selected.discard(sid)
+    def start():
+        cfg = dict(base)
+        cfg['source'] = state['source']
+        if state['source'] == 'bank':
+            cfg['levels'] = [state['level']] if state['level'] else None
         else:
-            self.ctx.selected.add(sid)
-        self.vlist.refresh()
-        self.update_header()
+            if not db.get_all_user_items(state['folder'] or None):
+                Toast.show(tr('no_items'), 'warn')
+                return False
+            cfg['folder_id'] = state['folder'] or None
+        cfg['kinds'] = {'both': ('word', 'sentence'), 'word': ('word',),
+                        'sentence': ('sentence',)}[state['kinds']]
+        if mode in ('spell', 'match'):
+            cfg['kinds'] = ('word',)
+        (on_start or app.start_game)(cfg)
 
-    def _long(self, idx, item):
-        self._tap(idx, item, 0)
+    Dialog(title=tr('choose_source'), body=body,
+           buttons=[(tr('cancel'), None, 'soft'), (tr('start'), start, 'primary')]).open()
 
-    def exit_selection(self):
-        self.ctx.selected.clear()
-        self.vlist.refresh()
-        self.update_header()
 
-    def confirm(self):
-        # every ticked video counts, also the ones a search is hiding right now
-        keys = [k for k in self.all_keys if k in self.ctx.selected]
-        if self.cid is None:
-            if not keys:
-                self.app.root.say('اختر فيديو واحد على الأقل لإنشاء القائمة')
-                return
-            cid = self.app.lib.create_playlist(self.new_name, keys)
-            self.app.store.save()
-            self.app.root.pop()
-            self.app.root.refresh_pages()
-            self.app.open_collection(cid)
+def folder_game_dialog(app, folder_id):
+    """Practice menu for one of the user's folders."""
+    body = vbox(spacing=dp(8))
+    holder = {}
+
+    def go(mode, n):
+        holder['d'].dismiss()
+        app.start_game({'mode': mode, 'source': 'user', 'folder_id': folder_id, 'n': n,
+                        'kinds': ('word',) if mode in ('spell', 'match') else ('word', 'sentence')})
+
+    for key, mode, n in (('mode_flash', 'flash', 10), ('mode_mcq', 'mcq', 10),
+                         ('mode_rev', 'rev', 10), ('mode_match', 'match', 10),
+                         ('mode_spell', 'spell', 8), ('mode_mixed', 'mixed', 10)):
+        body.add_widget(button(tr(key), lambda m=mode, k=n: go(m, k), style='soft', height=dp(48)))
+    d = Dialog(title=tr('practice'), body=body, buttons=[(tr('close'), None, 'soft')])
+    holder['d'] = d
+    d.open()
+
+
+# ======================================================================
+# Game host
+# ======================================================================
+class GameScreen(BaseScreen):
+    scrolling = False
+
+    def __init__(self, app, **kw):
+        super().__init__(app, **kw)
+        self.game = None
+        self.holder = BoxLayout()
+        self.add_widget(self.holder)
+
+    def topbar_spec(self):
+        cfg = self.app.game_cfg or {}
+        if cfg.get('level_test'):
+            n = cfg['level_test']
+            return (tr('level_n', n=n) + ' · ' + level_title(n), 'back', [])
+        key = cfg.get('title') or 'mode_' + str(cfg.get('mode', 'mcq'))
+        return (tr(key), 'back', [])
+
+    def on_pre_enter(self, *a):
+        self.app.apply_topbar(self)
+        self.launch()
+
+    def on_leave(self, *a):
+        self.stop_game()
+
+    def stop_game(self):
+        if self.game is not None:
+            try:
+                self.game.stop()
+            except Exception:
+                pass
+            self.game = None
+        self.app.tts.stop()
+
+    def launch(self):
+        self.stop_game()
+        self.holder.clear_widgets()
+        self.app.apply_topbar(self)             # title follows the mode that is starting
+        cfg = dict(self.app.game_cfg)
+        mode = cfg.get('mode')
+        if mode == 'flash':
+            g = games.FlashcardGame(self.app, cfg, self.on_finish)
+        elif mode == 'match':
+            g = games.MatchGame(self.app, cfg, self.on_finish)
+        else:
+            g = games.QuizGame(self.app, cfg, self.on_finish)
+        self.game = g
+        self.holder.add_widget(g)
+        if getattr(g.feeder, 'fallback', False):
+            Toast.show(tr('smart_fallback'), 'info')
+        Clock.schedule_once(lambda dt: g.start(), 0.05)
+
+    def on_finish(self, res):
+        app, db = self.app, self.app.db
+        cfg = res['cfg']
+        lines = []
+        mode = cfg.get('mode')
+        if mode in ('speed', 'survival'):
+            key = 'best_' + mode
+            best = db.get_int(key, 0)
+            if res['score'] > best:
+                db.set(key, res['score'])
+                if res['score'] > 0:
+                    lines.append((tr('new_record'), 'ok'))
+            else:
+                lines.append((tr('best_n', n=best), 'info'))
+            lines.append((tr('best_combo', n=res.get('best_combo', 0)), 'info'))
+        if cfg.get('level_test'):
+            lvl = cfg['level_test']
+            unlocked = db.save_level_result(lvl, res['pct'])
+            if res['pct'] >= PASS_SCORE:
+                lines.append((tr('test_passed', n=lvl), 'ok'))
+                if unlocked:
+                    lines.append((tr('level_unlocked', n=_level_label(unlocked)), 'ok'))
+            else:
+                lines.append((tr('test_failed', p=PASS_SCORE), 'bad'))
+        good = res['pct'] >= 60
+        app.sfx.play('win' if good else 'lose')
+        self.holder.clear_widgets()
+        self.game = None
+        view = games.ResultView(app, res, on_again=self.launch, on_back=app.go_back,
+                                extra_lines=lines)
+        self.holder.add_widget(view)
+        app.refresh_drawer()
+
+
+# ======================================================================
+# Settings
+# ======================================================================
+class SettingsScreen(BaseScreen):
+    def topbar_spec(self):
+        return (tr('nav_settings'), 'menu', [])
+
+    def build(self, col):
+        app, db = self.app, self.app.db
+
+        # --- appearance -----------------------------------------------------
+        col.add_widget(section_title(tr('s_appearance')))
+        c = auto_card(padding=[dp(14), dp(14)], spacing=dp(12))
+        c.add_widget(label(tr('s_theme'), size=16, bold=True))
+        c.add_widget(Segmented([('auto', tr('theme_auto')), ('dark', tr('theme_dark')),
+                                ('light', tr('theme_light'))], db.get('theme'),
+                               on_change=lambda v: self._set_rebuild('theme', v)))
+        c.add_widget(label(tr('s_theme_hint'), size=13, color='sub'))
+        c.add_widget(label(tr('s_language'), size=16, bold=True))
+        c.add_widget(Segmented([('ar', 'العربية'), ('en', 'English')], db.get('lang'),
+                               on_change=lambda v: self._set_rebuild('lang', v)))
+        col.add_widget(c)
+
+        # --- sound ---------------------------------------------------------------
+        col.add_widget(section_title(tr('s_sound')))
+        c = auto_card(padding=[dp(14), dp(14)], spacing=dp(12))
+        c.add_widget(switch_row(tr('s_sfx'), db.get_bool('sound'), self._set_sound,
+                                sub=tr('s_sfx_d')))
+        c.add_widget(switch_row(tr('s_autospeak'), db.get_bool('auto_speak'),
+                                lambda v: db.set('auto_speak', '1' if v else '0'),
+                                sub=tr('s_autospeak_d')))
+        c.add_widget(button(tr('s_test_voice'), lambda: app.speak('Hello! Welcome to Lingora.'),
+                            style='soft', height=dp(46)))
+        col.add_widget(c)
+
+        # --- dividers ---------------------------------------------------------------
+        col.add_widget(section_title(tr('s_dividers')))
+        c = auto_card(padding=[dp(14), dp(14)], spacing=dp(12))
+        c.add_widget(switch_row(tr('s_show_div'), db.get_bool('show_dividers'),
+                                lambda v: self._set_div('show_dividers', '1' if v else '0'),
+                                sub=tr('s_show_div_d')))
+        c.add_widget(label(tr('s_div_style'), size=15, bold=True))
+        c.add_widget(chips([('solid', tr('div_solid')), ('dashed', tr('div_dashed')),
+                            ('dotted', tr('div_dotted')), ('fade', tr('div_fade')),
+                            ('ornament', tr('div_ornament'))], db.get('divider_style'),
+                           lambda v: self._set_div('divider_style', v), cols=3, size=13))
+        c.add_widget(label(tr('s_div_width'), size=15, bold=True))
+        c.add_widget(Segmented([('1', tr('thin')), ('2', tr('medium')), ('3', tr('thick'))],
+                               db.get('divider_width'),
+                               on_change=lambda v: self._set_div('divider_width', v)))
+        c.add_widget(label(tr('s_div_color'), size=15, bold=True))
+        c.add_widget(Segmented([('neutral', tr('neutral')), ('accent', tr('accent'))],
+                               db.get('divider_color'),
+                               on_change=lambda v: self._set_div('divider_color', v)))
+        self.preview = vbox(spacing=0, padding=[dp(8), dp(4)])
+        self._fill_preview()
+        c.add_widget(self.preview)
+        col.add_widget(c)
+
+        # --- learning -------------------------------------------------------------------
+        col.add_widget(section_title(tr('s_learning')))
+        c = auto_card(padding=[dp(14), dp(14)], spacing=dp(12))
+        c.add_widget(label(tr('s_goal'), size=15, bold=True))
+        c.add_widget(Segmented([(str(n), str(n)) for n in (10, 20, 30, 50)],
+                               str(db.get_int('daily_goal', 20)),
+                               on_change=lambda v: db.set('daily_goal', v)))
+        c.add_widget(label(tr('s_round'), size=15, bold=True))
+        c.add_widget(Segmented([(str(n), str(n)) for n in (5, 10, 15, 20)],
+                               str(db.get_int('round_size', 10)),
+                               on_change=lambda v: db.set('round_size', v)))
+        c.add_widget(label(tr('s_kb_mode'), size=15, bold=True))
+        c.add_widget(Segmented([('auto', tr('kb_auto')), ('inapp', tr('kb_inapp')),
+                                ('phone', tr('kb_phone'))],
+                               db.get('kb_mode') or 'auto', on_change=self._set_kb_mode))
+        c.add_widget(label(tr('s_kb_mode_d'), size=13, color='sub'))
+        c.add_widget(button(tr('kb_diag'), self._kb_diag, style='soft', height=dp(44)))
+        c.add_widget(switch_row(tr('s_unlock_all'), db.get_bool('unlock_all'),
+                                lambda v: db.set('unlock_all', '1' if v else '0'),
+                                sub=tr('s_unlock_all_d')))
+        col.add_widget(c)
+
+        # --- backup ---------------------------------------------------------------------------
+        col.add_widget(section_title(tr('s_backup')))
+        c = auto_card(padding=[dp(14), dp(14)], spacing=dp(10))
+        c.add_widget(label(tr('s_backup_d'), size=13, color='sub'))
+        c.add_widget(button(tr('s_export'), self.export_backup, height=dp(48)))
+        c.add_widget(button(tr('s_import'), self.import_dialog, style='soft', height=dp(48)))
+        col.add_widget(c)
+
+        # --- data -----------------------------------------------------------------------------------
+        col.add_widget(section_title(tr('s_data')))
+        c = auto_card(padding=[dp(14), dp(14)], spacing=dp(10))
+        c.add_widget(button(tr('s_reset_progress'), lambda: confirm(
+            tr('s_reset_progress'), tr('s_reset_progress_q'), self._reset_progress,
+            yes_text=tr('confirm'), no_text=tr('cancel'), danger=True), style='ghost',
+            height=dp(46)))
+        c.add_widget(button(tr('s_reset_all'), lambda: confirm(
+            tr('s_reset_all'), tr('s_reset_all_q'), self._reset_all,
+            yes_text=tr('delete'), no_text=tr('cancel'), danger=True), style='danger',
+            height=dp(46)))
+        col.add_widget(c)
+
+        c = auto_card(padding=[dp(14), dp(14)], spacing=dp(4))
+        c.add_widget(label('Lingora  •  v1.0', size=15, bold=True, align='center'))
+        c.add_widget(label(tr('about'), size=13, color='sub', align='center'))
+        col.add_widget(c)
+
+    # -- setting handlers -------------------------------------------------------
+    def _set_rebuild(self, key, value):
+        self.app.db.set(key, value)
+        Clock.schedule_once(lambda dt: self.app.rebuild('settings'), 0.05)
+
+    def _set_sound(self, v):
+        self.app.db.set('sound', '1' if v else '0')
+        self.app.sfx.enabled = bool(v)
+        if v:
+            self.app.sfx.play('correct')
+
+    def _set_kb_mode(self, v):
+        self.app.db.set('kb_mode', v)
+        widgets_mod.VK['mode'] = v
+
+    def _kb_diag(self):
+        from services import keyboard_diagnostics
+        body = vbox(spacing=dp(2))
+        for ln in keyboard_diagnostics():
+            body.add_widget(label(ln, size=12, color='sub'))
+        Dialog(title=tr('kb_diag'), body=body, buttons=[(tr('close'), None, 'primary')]).open()
+
+    def _set_div(self, key, value):
+        self.app.db.set(key, value)
+        self._fill_preview()
+
+    def _fill_preview(self):
+        self.preview.clear_widgets()
+        self.preview.add_widget(label(tr('s_preview_a'), size=15, padding=[0, dp(8)]))
+        self.preview.add_widget(make_divider(self.app))
+        self.preview.add_widget(label(tr('s_preview_b'), size=15, padding=[0, dp(8)]))
+
+    # -- backup ---------------------------------------------------------------------------
+    def export_backup(self):
+        app = self.app
+        path = app.storage.new_backup_path()
+        if not path:
+            Toast.show(tr('err_storage'), 'error')
             return
-        if keys:
-            n = self.app.lib.add_to_playlist(self.cid, keys)
-            self.app.store.save()
-            self.app.root.say('تمت إضافة %d فيديو' % n)
-        self.app.root.pop()
+        try:
+            app.db.write_backup_file(path)
+        except Exception as e:                       # noqa: BLE001
+            Toast.show(tr('err_export', e=str(e)), 'error')
+            return
+        body = vbox(spacing=dp(8))
+        body.add_widget(label(tr('export_ok'), size=15))
+        body.add_widget(label(path, size=13, color='primary', align='left'))
+        Dialog(title=tr('s_export'), body=body, buttons=[(tr('close'), None, 'primary')]).open()
 
+    def import_dialog(self):
+        app = self.app
+        body = vbox(spacing=dp(10))
+        path_field = FormField(tr('import_path'), hint='/storage/emulated/0/Download/...json', vk_lang='en')
+        path_field.input.halign = 'left'
+        body.add_widget(label(tr('import_found'), size=13, color='sub', bold=True))
+        found = app.storage.list_backups()
+        if not found:
+            body.add_widget(label(tr('import_none'), size=14, color='sub'))
+        for p, mtime, size in found[:8]:
+            when = time.strftime('%Y-%m-%d %H:%M', time.localtime(mtime))
+            b = button(os.path.basename(p) + '\n' + when, None, style='soft', size=13,
+                       height=dp(54))
+            b.bind(on_release=lambda inst, p=p: setattr(path_field.input, 'text', p))
+            body.add_widget(b)
+        body.add_widget(path_field)
+        body.add_widget(label(tr('import_modes'), size=12, color='sub'))
 
-_ = (textfix, SURFACE, SURFACE2, TEXT, DIVIDER, ChipsRow)   # imported for convenience
+        def run(mode):
+            path = path_field.text
+            if not path:
+                Toast.show(tr('err_path'), 'error')
+                return False
+            try:
+                data = app.db.read_backup_file(path)
+                stats = app.db.import_all(data, mode)
+            except Exception as e:                   # noqa: BLE001
+                Toast.show(tr('err_import', e=str(e)[:80]), 'error', 3.5)
+                return False
+            Toast.show(tr('import_ok', f=stats['folders'], i=stats['items']), 'ok', 3)
+            Clock.schedule_once(lambda dt: app.rebuild('settings'), 0.1)
+            return True
+
+        def replace():
+            if not path_field.text:
+                Toast.show(tr('err_path'), 'error')
+                return False
+            confirm(tr('import_replace'), tr('import_replace_q'), lambda: run('replace'),
+                    yes_text=tr('confirm'), no_text=tr('cancel'), danger=True)
+            return True
+
+        Dialog(title=tr('s_import'), body=body,
+               buttons=[(tr('import_merge'), lambda: run('merge'), 'primary'),
+                        (tr('import_replace'), replace, 'danger')]).open()
+
+    def _reset_progress(self):
+        self.app.db.reset_progress()
+        Toast.show(tr('done'), 'ok')
+        self.app.rebuild('settings')
+
+    def _reset_all(self):
+        self.app.db.reset_everything()
+        Toast.show(tr('done'), 'ok')
+        self.app.rebuild('settings')

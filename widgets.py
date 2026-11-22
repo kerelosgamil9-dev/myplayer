@@ -1,2483 +1,1964 @@
 # -*- coding: utf-8 -*-
 """
-widgets.py - all custom widgets (pure Python, no .kv files):
-  Txt, Icon, Tap, IconButton, Thumb, PillSwitch, SeekBar, FieldInput,
-  VList (virtualised list with scrolling, long-press selection and drag reordering),
-  Overlay / MenuSheet / Dialog / PromptDialog, Toast.
+widgets.py - the reusable UI toolkit of Lingora (pure Kivy, no KivyMD).
+
+ALabel        Arabic-aware label (shaping, bidi, wrapping, highlighter)
+RButton       rounded button
+Icon / IconButton   vector icons drawn with the canvas (no icon fonts)
+Card, Divider, BarProgress, Toggle, Segmented, ColorDots
+FlameWidget   the streak fire with real fire colours
+ATextInput, FormField   text inputs that paint joined Arabic while typing
+WeekStrip, Dialog, Toast, NavDrawer, TopBar
 """
+
 import math
-import os
-import time
-from collections import OrderedDict
 
 from kivy.animation import Animation
 from kivy.clock import Clock
-from kivy.core.image import Image as CoreImage
-from kivy.core.text import Label as CoreLabel, LabelBase
-from kivy.graphics import (Color, Ellipse, Line, Mesh, PopMatrix, PushMatrix, Rectangle,
-                           RoundedRectangle, Translate, Triangle)
+from kivy.core.text import Label as CoreLabel
+from kivy.core.window import Window
+from kivy.graphics import (Color, Ellipse, InstructionGroup, Line, Mesh,
+                           Rectangle, RoundedRectangle)
+try:                                    # present in every normal Kivy build
+    from kivy.graphics.tesselator import Tesselator, WINDING_ODD, TYPE_POLYGONS
+except Exception:                       # noqa: BLE001 - fallback drawing is used
+    Tesselator = None
+from kivy.graphics.texture import Texture
 from kivy.metrics import dp, sp
 from kivy.properties import (BooleanProperty, ListProperty, NumericProperty,
-                             StringProperty)
+                             ObjectProperty, OptionProperty, StringProperty)
+from kivy.uix.behaviors import ButtonBehavior
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.label import Label
-from kivy.uix.stencilview import StencilView
+from kivy.uix.modalview import ModalView
+from kivy.uix.scrollview import ScrollView
 from kivy.uix.textinput import TextInput
 from kivy.uix.widget import Widget
 
-import core
-import textfix
-
-HERE = os.path.dirname(os.path.abspath(__file__))
-
-# ---------------------------------------------------------------------------
-# theme
-# ---------------------------------------------------------------------------
-BG = (0.031, 0.033, 0.043, 1)
-BG_INT = 0xFF000000 | (int(round(BG[0] * 255)) << 16) | (int(round(BG[1] * 255)) << 8) | int(round(BG[2] * 255))
-SURFACE = (0.082, 0.087, 0.108, 1)
-SURFACE2 = (0.128, 0.134, 0.160, 1)
-ACCENT = (1.0, 0.42, 0.37, 1)
-ACCENT_SOFT = (1.0, 0.42, 0.37, 0.16)
-ON_ACCENT = (0.10, 0.04, 0.04, 1)          # text / icons drawn on top of the accent colour
-TEXT = (0.97, 0.97, 0.98, 1)
-SUB = (0.62, 0.64, 0.69, 1)
-DIVIDER = (1, 1, 1, 0.07)
-DANGER = (1.0, 0.36, 0.36, 1)
-SCRIM = (0, 0, 0, 0.66)                    # translucent dark chips drawn over the video
-
-AR_FONT = 'ProArabic'
-LATIN_FONT = 'Roboto'
+import rtl
+from services import find_asset
+from theme import C, THEME, alpha, mix
 
 
-def _find_font(*names):
-    """First font file that exists (in assets/fonts, or next to this file when the app is flat)."""
-    for n in names:
-        for d in (os.path.join(HERE, 'assets', 'fonts'), HERE):
-            p = os.path.join(d, n)
-            if os.path.exists(p):
-                return p
-    return None
+# ======================================================================
+# helpers
+# ======================================================================
+_core_cache = {}
 
 
-def register_fonts():
-    """IBM Plex Sans Arabic (clean, modern; Arabic + Latin in one family); DejaVu if it is missing."""
-    global LATIN_FONT
-    reg = _find_font('ProArabic-Regular.ttf', 'DejaVuSans.ttf')
-    bold = _find_font('ProArabic-SemiBold.ttf', 'DejaVuSans-Bold.ttf') or reg
-    if reg is None:
-        return
-    LabelBase.register(name=AR_FONT, fn_regular=reg, fn_bold=bold)
-    if 'ProArabic' in os.path.basename(reg):
-        LATIN_FONT = AR_FONT
-
-
-def font_for(text):
-    return AR_FONT if core.has_arabic(text) else LATIN_FONT
-
-
-# ---------------------------------------------------------------------------
-# text measuring
-# ---------------------------------------------------------------------------
-_core_labels = {}
-_measure_cache = {}
-
-
-def measure(text, font, size, bold=False):
-    key = (text, font, round(size, 1), bold)
-    w = _measure_cache.get(key)
-    if w is not None:
-        return w
-    lk = (font, round(size, 1), bold)
-    lab = _core_labels.get(lk)
-    if lab is None:
-        lab = CoreLabel(font_name=font, font_size=size, bold=bold)
-        _core_labels[lk] = lab
+def measure_text(text, font_name, font_size, bold=False):
+    """Pixel width of a single line of text with the given font."""
+    key = (font_name, round(float(font_size), 1), bool(bold))
+    cl = _core_cache.get(key)
+    if cl is None:
+        cl = CoreLabel(font_name=font_name, font_size=font_size, bold=bold)
+        _core_cache[key] = cl
     try:
-        w = lab.get_extents(text)[0]
+        return cl.get_extents(text)[0]
     except Exception:
-        w = len(text) * size * 0.6
-    if len(_measure_cache) > 20000:
-        _measure_cache.clear()
-    _measure_cache[key] = w
-    return w
+        return len(text) * font_size * 0.55
 
 
-_lh_cache = {}
+def is_rtl():
+    return rtl.UI_RTL
 
 
-def line_height(font, size, bold=False):
-    """Height in pixels of one line of text in this font (the font's own ascent + descent)."""
-    key = (font, round(size, 1), bold)
-    h = _lh_cache.get(key)
-    if h is None:
-        try:
-            lab = CoreLabel(text='Ag\u0644', font_name=font, font_size=size, bold=bold)
-            lab.refresh()
-            h = float(lab.texture.height)
-        except Exception:
-            h = size * 1.4
-        _lh_cache[key] = h
-    return h
+def vbox(**kw):
+    """Vertical box whose height follows its content."""
+    kw.setdefault('size_hint_y', None)
+    b = BoxLayout(orientation='vertical', **kw)
+    b.bind(minimum_height=b.setter('height'))
+    return b
 
 
-class Txt(Label):
-    """Label that takes *logical* text (Arabic / English) and does shaping, bidi,
-    ellipsis and wrapping by itself."""
-    ltext = StringProperty('')
-    nlines = NumericProperty(1)
-    keep_nl = BooleanProperty(False)
-    align_mode = StringProperty('right')      # right | left | center | auto
+def hbox(height=None, **kw):
+    """Horizontal box with a fixed height."""
+    if height is not None:
+        kw['size_hint_y'] = None
+        kw['height'] = height
+    return BoxLayout(orientation='horizontal', **kw)
 
-    def __init__(self, text='', **kw):
-        kw.pop('text', None)
-        ltext = kw.pop('ltext', text)
-        if 'align_mode' not in kw and kw.get('halign') in ('left', 'center', 'right'):
-            kw['align_mode'] = kw['halign']          # an explicit halign must not be overridden later
-        kw.setdefault('halign', 'right')
-        kw.setdefault('valign', 'middle')
-        kw.setdefault('color', TEXT)
-        kw.setdefault('font_size', sp(16))
-        kw.setdefault('size_hint', (1, 1))
-        super(Txt, self).__init__(**kw)
-        self._ltext_init = ltext
-        self.bind(ltext=self._refresh, size=self._refresh, font_size=self._refresh,
-                  bold=self._refresh, nlines=self._refresh, align_mode=self._refresh)
-        self.ltext = ltext
+
+def add_row(box, widgets):
+    """Add widgets in reading order (reversed automatically in RTL mode)."""
+    for w in (reversed(list(widgets)) if rtl.UI_RTL else widgets):
+        box.add_widget(w)
+    return box
+
+
+def spacer(w=None, h=None):
+    kw = {}
+    if w is not None:
+        kw.update(size_hint_x=None, width=w)
+    if h is not None:
+        kw.update(size_hint_y=None, height=h)
+    return Widget(**kw)
+
+
+def label(text='', size=15, color='text', bold=False, align='auto', wrap=True,
+          autoheight=True, **kw):
+    """Factory for the most common label configuration."""
+    col = kw.pop('color_rgba', None) or C(color)
+    if wrap:
+        kw.setdefault('size_hint_y', None)
+        if not autoheight:
+            kw.setdefault('height', dp(size * 2))
+    return ALabel(raw=text, font_size=sp(size), color=col, bold=bold,
+                  align=align, wrap=wrap, autoheight=autoheight, **kw)
+
+
+# ======================================================================
+# ALabel
+# ======================================================================
+class ALabel(Label):
+    """Label that draws Arabic correctly and can paint a marker highlight.
+
+    raw        logical text (what the user typed / what is stored)
+    align      auto | left | right | center   (auto follows the text direction)
+    wrap       word-wrap inside the widget width
+    autoheight resize the widget height to the wrapped text (needs wrap=True)
+    fit        resize the widget to the text (single line)
+    hl         RGBA list painted behind the text like a highlighter pen
+    """
+
+    raw = StringProperty('')
+    align = OptionProperty('auto', options=('auto', 'left', 'right', 'center'))
+    wrap = BooleanProperty(False)
+    autoheight = BooleanProperty(False)
+    fit = BooleanProperty(False)
+    hl = ListProperty([])
+
+    def __init__(self, **kw):
+        raw = kw.pop('raw', kw.pop('text', ''))
+        kw.setdefault('markup', False)
+        super().__init__(**kw)
+        self._hl_group = InstructionGroup()
+        self.canvas.before.add(self._hl_group)
+        self._trig = Clock.create_trigger(self._refresh, -1)
+        self._trig_hl = Clock.create_trigger(self._draw_hl, -1)
+        self.bind(raw=self._trig, width=self._trig, height=self._trig,
+                  font_size=self._trig, font_name=self._trig, align=self._trig,
+                  wrap=self._trig, bold=self._trig, fit=self._trig,
+                  hl=self._trig_hl, pos=self._trig_hl, size=self._trig_hl,
+                  texture_size=self._on_texture_size)
+        self.raw = raw
         self._refresh()
 
-    def _refresh(self, *a):
-        txt = self.ltext or ''
-        w = self.width
-        if w < 2 or not txt:
-            if self.text:
-                self.text = ''
-            return
-        font = font_for(txt)
-        if self.font_name != font:
-            self.font_name = font
-        size, bold = self.font_size, self.bold
-
-        def m(s):
-            return measure(s, font, size, bold)
-        if self.keep_nl:
-            lines = []
-            for part in txt.split('\n'):
-                lines.extend(textfix.wrap_text(part, w, m, max(1, self.nlines)) or [''])
+    # -- layout / text ----------------------------------------------------
+    def _refresh(self, *args):
+        raw = self.raw or ''
+        base_rtl = rtl.base_is_rtl(raw)
+        align = self.align
+        if align == 'auto':
+            align = 'right' if base_rtl else 'left'
+        self.halign = align
+        px, py = self.padding_x, self.padding_y
+        if self.wrap:
+            avail = max(1.0, self.width - 2 * px)
+            self.text_size = (avail, None)
+            self.valign = 'top' if self.autoheight else 'middle'
+            if self.width > 1 and rtl.ENABLED and rtl.has_rtl(raw):
+                fn, fs, bd = self.font_name, self.font_size, self.bold
+                self.text = rtl.wrap_display(
+                    raw, avail - 3, lambda s: measure_text(s, fn, fs, bd), base_rtl)
+            else:
+                self.text = raw
+        elif self.fit:
+            self.text_size = (None, None)
+            self.text = rtl.display(raw, base_rtl)
         else:
-            lines = textfix.wrap_text(txt, w, m, max(1, self.nlines))
-        base = None
-        vis = '\n'.join(textfix.fix(l, base) for l in lines)
-        mode = self.align_mode
-        if mode == 'auto':
-            self.halign = 'right' if textfix.is_rtl(txt) else 'left'
-        elif mode in ('right', 'left', 'center'):
-            self.halign = mode
-        self.text = vis
-        self.text_size = (w, self.height)
+            self.text_size = (max(1.0, self.width - 2 * px),
+                              max(1.0, self.height - 2 * py))
+            self.valign = 'middle'
+            self.shorten = True
+            self.text = rtl.display(raw, base_rtl)
+        self._trig_hl()
 
-    def text_height(self, lines=None):
-        """Height that `lines` lines (default: as many as the text really needs) of this label take."""
-        n = lines if lines is not None else len(self.logical_lines())
-        return max(1, n) * line_height(font_for(self.ltext or 'a'), self.font_size, self.bold)
+    def _on_texture_size(self, *args):
+        tw, th = self.texture_size
+        if self.fit:
+            self.size = (tw + 2 * self.padding_x, th + 2 * self.padding_y)
+        elif self.wrap and self.autoheight:
+            new_h = th + 2 * self.padding_y
+            if abs(new_h - self.height) > 0.5:
+                self.height = new_h
+        self._trig_hl()
 
-    def logical_lines(self):
-        """The lines the text is wrapped into (logical order), at the current width."""
-        txt = self.ltext or ''
-        if not txt or self.width < 2:
-            return [txt]
-        font = font_for(txt)
-        size, bold = self.font_size, self.bold
-        return textfix.wrap_text(txt, self.width, lambda t: measure(t, font, size, bold),
-                                 max(1, self.nlines)) or [txt]
+    # -- marker highlight --------------------------------------------------
+    def _draw_hl(self, *args):
+        self._hl_group.clear()
+        if not self.hl or not self.text:
+            return
+        tw, th = self.texture_size
+        if tw <= 1 or th <= 1:
+            return
+        lines = self.text.split('\n')
+        n = len(lines)
+        lh = th / float(n)
+        x0 = self.center_x - tw / 2.0
+        y_top = self.center_y + th / 2.0
+        pad = dp(4)
+        self._hl_group.add(Color(*self.hl))
+        for i, ln in enumerate(lines):
+            if not ln.strip():
+                continue
+            w = measure_text(ln, self.font_name, self.font_size, self.bold)
+            if self.halign == 'right':
+                x = x0 + tw - w
+            elif self.halign == 'center':
+                x = x0 + (tw - w) / 2.0
+            else:
+                x = x0
+            y = y_top - (i + 1) * lh
+            self._hl_group.add(RoundedRectangle(
+                pos=(x - pad, y + lh * 0.08), size=(w + 2 * pad, lh * 0.84),
+                radius=[dp(5)]))
 
-    def text_width(self):
-        txt = self.ltext or ''
-        if not txt:
-            return 0
-        font = font_for(txt)
-        return measure(textfix.fix(txt), font, self.font_size, self.bold)
+
+def centered(widget, size):
+    """Wrap a fixed-size widget so it stays vertically centred in a row."""
+    box = BoxLayout(orientation='vertical', size_hint=(None, 1), width=size[0])
+    box.add_widget(Widget())
+    widget.size_hint = (None, None)
+    widget.size = size
+    box.add_widget(widget)
+    box.add_widget(Widget())
+    return box
 
 
-# ---------------------------------------------------------------------------
-# icons (vector, drawn with canvas instructions on a 24x24 grid, y down)
-# ---------------------------------------------------------------------------
-def _arc(cx, cy, r, a0, a1, n=18):
+def logo_image(size):
+    """The Lingora logo as a fixed-size image (falls back to an empty spacer)."""
+    path = find_asset('logo.png')
+    if not path:
+        return Widget(size_hint=(None, None), size=(size, size))
+    from kivy.uix.image import Image
+    return Image(source=path, size_hint=(None, None), size=(size, size), mipmap=True)
+
+
+# ======================================================================
+# Icons
+# ======================================================================
+def _star_points(cx, cy, ro, ri):
     pts = []
-    for i in range(n + 1):
-        a = math.radians(a0 + (a1 - a0) * i / float(n))
-        pts.append((cx + r * math.cos(a), cy + r * math.sin(a)))
+    for k in range(10):
+        ang = math.pi / 2 + k * math.pi / 5
+        r = ro if k % 2 == 0 else ri
+        pts += [cx + r * math.cos(ang), cy + r * math.sin(ang)]
     return pts
 
 
-def _rrect(x0, y0, x1, y1, r, n=5):
-    """Closed outline of a rounded rectangle (24 grid, y down)."""
-    pts = []
-    for (cx, cy, a0) in ((x1 - r, y0 + r, 270), (x1 - r, y1 - r, 0), (x0 + r, y1 - r, 90), (x0 + r, y0 + r, 180)):
-        pts.extend(_arc(cx, cy, r, a0, a0 + 90, n))
-    pts.append(pts[0])
-    return pts
+_SPEAKER = [('R', .14, .38, .16, .24),
+            ('F', [.30, .38, .52, .20, .52, .80, .30, .62])]
 
-
-def _arrow_head(cx, cy, r, a, h=4.0):
-    import math
-    ar = math.radians(a)
-    ex, ey = cx + r * math.cos(ar), cy + r * math.sin(ar)
-    tx, ty = -math.sin(ar), math.cos(ar)
-    nx, ny = math.cos(ar), math.sin(ar)
-    return [(ex - tx * h + nx * h * 0.8, ey - ty * h + ny * h * 0.8), (ex, ey),
-            (ex - tx * h - nx * h * 0.8, ey - ty * h - ny * h * 0.8)]
-
-
-def _arrow_fill(cx, cy, r, a, h=3.6):
-    """Solid arrow head at angle `a` of a circle, pointing the way the angle grows."""
-    ar = math.radians(a)
-    ex, ey = cx + r * math.cos(ar), cy + r * math.sin(ar)
-    tx, ty = -math.sin(ar), math.cos(ar)
-    nx, ny = math.cos(ar), math.sin(ar)
-    return ('fill', [(ex + tx * h, ey + ty * h), (ex + nx * h * 0.85, ey + ny * h * 0.85),
-                     (ex - nx * h * 0.85, ey - ny * h * 0.85)])
-
-
-def _mirror(ops):
-    """The same icon flipped left <-> right (24 grid)."""
+def _u(*pts):
+    """svg-style points (24x24, y down) -> unit square (y up), flat list."""
     out = []
-    for op in ops:
-        k = op[0]
-        if k in ('line', 'fill'):
-            out.append((k, [(24 - x, y) for (x, y) in op[1]]))
-        elif k == 'rect':
-            out.append((k, 24 - op[1] - op[3], op[2], op[3], op[4]))
-        else:                                   # circle / dot
-            out.append((k, 24 - op[1], op[2], op[3]))
+    for x, y in pts:
+        out += [round(x / 24.0, 4), round(1 - y / 24.0, 4)]
     return out
 
 
-_STEP_FWD = [('line', _arc(12, 13.2, 8.2, 300, 603, 30)), _arrow_fill(12, 13.2, 8.2, 603, 3.5)]
-
 ICONS = {
-    'play': [('fill', [(7, 4), (20, 12), (7, 20)])],
-    'pause': [('rect', 6, 4, 4, 16), ('rect', 14, 4, 4, 16)],
-    'next': [('fill', [(6, 5), (16, 12), (6, 19)]), ('rect', 16.5, 5, 2.5, 14)],
-    'prev': [('fill', [(18, 5), (8, 12), (18, 19)]), ('rect', 5, 5, 2.5, 14)],
-    'rew': [('fill', [(12, 6), (3, 12), (12, 18)]), ('fill', [(21, 6), (12, 12), (21, 18)])],
-    'fwd': [('fill', [(3, 6), (12, 12), (3, 18)]), ('fill', [(12, 6), (21, 12), (12, 18)])],
-    'back': [('line', [(4, 12), (20, 12)]), ('line', [(13, 5), (20, 12), (13, 19)])],
-    'chev_left': [('line', [(15, 5), (8, 12), (15, 19)])],
-    'chev_right': [('line', [(9, 5), (16, 12), (9, 19)])],
-    'close': [('line', [(6, 6), (18, 18)]), ('line', [(18, 6), (6, 18)])],
-    'plus': [('line', [(12, 5), (12, 19)]), ('line', [(5, 12), (19, 12)])],
-    'dots': [('dot', 12, 5, 2), ('dot', 12, 12, 2), ('dot', 12, 19, 2)],
-    'check': [('line', [(5, 12.5), (10, 17.5), (19, 7)])],
-    'folder_play': [('line', [(3, 6), (10, 6), (12, 8.5), (21, 8.5), (21, 19), (3, 19), (3, 6)]),
-                    ('fill', [(10, 11.5), (10, 16.5), (15, 14)])],
-    'folder': [('line', [(3, 6), (10, 6), (12, 8.5), (21, 8.5), (21, 19), (3, 19), (3, 6)])],
-    'download': [('line', [(12, 4), (12, 15)]), ('line', [(7, 10.5), (12, 15.5), (17, 10.5)]),
-                 ('line', [(5, 19.5), (19, 19.5)])],
-    'person': [('circle', 12, 8, 4), ('line', [(4.5, 20.5), (5.5, 16.5), (9, 14), (15, 14), (18.5, 16.5), (19.5, 20.5)])],
-    'search': [('circle', 10.5, 10.5, 6), ('line', [(15, 15), (20, 20)])],
-    'sort': [('line', [(4, 7), (20, 7)]), ('line', [(4, 12), (15, 12)]), ('line', [(4, 17), (10, 17)])],
-    'trash': [('line', [(6, 7), (7, 20), (17, 20), (18, 7)]), ('line', [(4, 7), (20, 7)]),
-              ('line', [(9, 7), (9, 4), (15, 4), (15, 7)])],
-    'edit': [('line', [(4, 20), (5, 15), (16, 4), (20, 8), (9, 19), (4, 20)])],
-    'playlist_add': [('line', [(4, 7), (14, 7)]), ('line', [(4, 12), (14, 12)]), ('line', [(4, 17), (10, 17)]),
-                     ('line', [(18, 12), (18, 20)]), ('line', [(14, 16), (22, 16)])],
-    'playlist': [('line', [(8, 7), (20, 7)]), ('line', [(8, 12), (20, 12)]), ('line', [(8, 17), (20, 17)]),
-                 ('dot', 4, 7, 1.3), ('dot', 4, 12, 1.3), ('dot', 4, 17, 1.3)],
-    'select_all': [('line', [(4, 7), (4, 20), (17, 20)]), ('line', [(8, 4), (20, 4), (20, 16), (8, 16), (8, 4)]),
-                   ('line', [(11, 10), (13.5, 12.5), (17, 8)])],
-    'rotate': [('line', _arc(12, 12, 7.5, 40, 330)), _arrow_fill(12, 12, 7.5, 330, 4.2)],
-    'lock': [('line', _rrect(5, 10.5, 19, 20.5, 2.6)),
-             ('line', [(8.2, 10.5), (8.2, 7.8)] + _arc(12, 7.8, 3.8, 180, 360, 12) + [(15.8, 7.8), (15.8, 10.5)]),
-             ('dot', 12, 15.0, 1.45), ('line', [(12, 15.4), (12, 17.6)])],
-    'unlock': [('line', _rrect(5, 10.5, 19, 20.5, 2.6)),
-               ('line', [(8.2, 10.5), (8.2, 6.6)] + _arc(12, 6.6, 3.8, 180, 360, 12) + [(15.8, 6.6), (15.8, 8.0)]),
-               ('dot', 12, 15.0, 1.45), ('line', [(12, 15.4), (12, 17.6)])],
-    'speed': [('line', _arc(12, 15, 9, 190, 350, 22)), ('line', [(12, 15), (16.5, 10)]), ('dot', 12, 15, 1.6)],
-    'subtitle': [('line', _rrect(3, 5, 21, 19, 3.2)),
-                 ('line', _arc(9.0, 12, 2.6, 42, 318, 12)), ('line', _arc(15.4, 12, 2.6, 42, 318, 12))],
-    'audio': [('dot', 8, 18, 3), ('line', [(11, 18), (11, 5), (19, 7.5)])],
-    'brightness': [('circle', 12, 12, 4)] + [('line', [(12 + 7 * math.cos(math.radians(a)), 12 + 7 * math.sin(math.radians(a))),
-                                                       (12 + 10 * math.cos(math.radians(a)), 12 + 10 * math.sin(math.radians(a)))])
-                                              for a in range(0, 360, 45)],
-    'volume': [('fill', [(4, 9), (8, 9), (13, 5), (13, 19), (8, 15), (4, 15)]),
-               ('line', _arc(14, 12, 4, -50, 50)), ('line', _arc(14, 12, 8, -50, 50))],
-    'repeat': [('line', [(4, 11), (4, 7), (18, 7)]), ('line', [(15, 4), (18, 7), (15, 10)]),
-               ('line', [(20, 13), (20, 17), (6, 17)]), ('line', [(9, 14), (6, 17), (9, 20)])],
-    'repeat_one': [('line', [(4, 11), (4, 7), (18, 7)]), ('line', [(15, 4), (18, 7), (15, 10)]),
-                   ('line', [(20, 13), (20, 17), (6, 17)]), ('line', [(9, 14), (6, 17), (9, 20)]),
-                   ('line', [(11, 10.5), (12.5, 9.5), (12.5, 14.5)])],
-    'shuffle': [('line', [(3, 7), (8, 7), (15, 17), (20, 17)]), ('line', [(3, 17), (8, 17), (15, 7), (20, 7)]),
-                ('line', [(17, 4), (20, 7), (17, 10)]), ('line', [(17, 14), (20, 17), (17, 20)])],
-    'drag': [('line', [(5, 7.5), (19, 7.5)]), ('line', [(5, 12), (19, 12)]), ('line', [(5, 16.5), (19, 16.5)])],
-    'clock': [('circle', 12, 12, 9), ('line', [(12, 7), (12, 12), (16, 14)])],
-    'tune': [('line', [(4, 8), (20, 8)]), ('line', [(4, 16), (20, 16)]), ('dot', 9, 8, 2.6), ('dot', 15, 16, 2.6)],
-    'move_top': [('line', [(5, 5), (19, 5)]), ('line', [(12, 20), (12, 9)]), ('line', [(7, 13), (12, 8), (17, 13)])],
-    'move_bottom': [('line', [(5, 19), (19, 19)]), ('line', [(12, 4), (12, 15)]), ('line', [(7, 11), (12, 16), (17, 11)])],
-    'info': [('circle', 12, 12, 9), ('line', [(12, 11), (12, 17)]), ('dot', 12, 7.5, 1.3)],
-    'restore': _mirror([('line', _arc(12, 12, 8, 40, 330)), _arrow_fill(12, 12, 8, 330, 4.2)]) +
-               [('line', [(12, 8), (12, 12), (14.8, 13.8)])],
-    'up': [('line', [(6, 15), (12, 9), (18, 15)])],
-    'arrow_up': [('line', [(12, 19), (12, 5)]), ('line', [(6, 11), (12, 5), (18, 11)])],
-    'arrow_down': [('line', [(12, 5), (12, 19)]), ('line', [(6, 13), (12, 19), (18, 13)])],
-    'down': [('line', [(6, 9), (12, 15), (18, 9)])],
-    'step_fwd': _STEP_FWD,
-    'step_back': _mirror(_STEP_FWD),
-    'volume_mute': [('fill', [(4, 9), (8, 9), (13, 5), (13, 19), (8, 15), (4, 15)]),
-                    ('line', [(16, 9.5), (21, 14.5)]), ('line', [(21, 9.5), (16, 14.5)])],
-    'bolt': [('fill', [(13, 3), (6, 13), (11, 13), (10, 21), (18, 10), (13, 10)])],
-    'share': [('circle', 18, 5.5, 2.7), ('circle', 6, 12, 2.7), ('circle', 18, 18.5, 2.7),
-              ('line', [(8.4, 10.7), (15.6, 6.8)]), ('line', [(8.4, 13.3), (15.6, 17.2)])],
-    # a phone with a turning arrow on each side: rotate the screen
-    'screen_rotate': [('line', _rrect(4.5, 9.5, 16.5, 19.5, 2.2)),
-                      ('line', _arc(11.5, 12.5, 9.5, 232, 330, 10)), ('line', _arrow_head(11.5, 12.5, 9.5, 330, 3.3))],
+    'menu': [('L', [.15, .28, .85, .28]), ('L', [.15, .50, .85, .50]),
+             ('L', [.15, .72, .85, .72])],
+    'back': [('L', [.80, .50, .22, .50]), ('L', [.46, .76, .22, .50, .46, .24])],
+    'chevron': [('L', [.36, .22, .66, .50, .36, .78])],
+    'plus': [('L', [.50, .20, .50, .80]), ('L', [.20, .50, .80, .50])],
+    'close': [('L', [.24, .24, .76, .76]), ('L', [.24, .76, .76, .24])],
+    'check': [('L', [.20, .52, .42, .30, .80, .72])],
+    'speaker': _SPEAKER + [('A', .50, .50, .20, 45, 135), ('A', .50, .50, .34, 45, 135)],
+    'mute': _SPEAKER + [('L', [.64, .36, .88, .64]), ('L', [.64, .64, .88, .36])],
+    'edit': [('LC', _u((16.5, 3.5), (18, 2.88), (19.5, 3.5), (20.12, 5), (19.5, 6.5),
+                       (7, 19), (3, 20), (4, 16))),
+             ('L', _u((12.5, 21), (21, 21)))],
+    'trash': [('L', _u((3, 6), (21, 6))),
+              ('L', _u((5, 6), (6, 19.2), (6.6, 21), (8, 22), (16, 22), (17.4, 21),
+                       (18, 19.2), (19, 6))),
+              ('L', _u((8, 6), (8, 4), (8.6, 2.6), (10, 2), (14, 2), (15.4, 2.6), (16, 4),
+                       (16, 6))),
+              ('L', _u((10, 11), (10, 17))), ('L', _u((14, 11), (14, 17)))],
+    'star': [('STAR',)],
+    'marker': [('F', [.28, .38, .62, .72, .80, .54, .46, .20]),
+               ('T', .28, .38, .46, .20, .16, .16), ('L', [.12, .08, .56, .08])],
+    'search': [('C', .43, .57, .24), ('L', [.62, .38, .84, .16])],
+    'home': [('L', [.12, .50, .50, .86, .88, .50]),
+             ('L', [.22, .46, .22, .14, .78, .14, .78, .46]),
+             ('L', [.42, .14, .42, .38, .58, .38, .58, .14])],
+    'folder': [('LC', [.10, .20, .10, .78, .40, .78, .48, .66, .90, .66, .90, .20])],
+    'levels': [('R', .14, .14, .20, .26), ('R', .40, .14, .20, .46), ('R', .66, .14, .20, .68)],
+    'bolt': [('F', [.58, .92, .22, .46, .52, .46]), ('F', [.42, .08, .78, .54, .48, .54]),
+             ('R', .38, .44, .24, .12)],
+    'gear': [('C', .50, .50, .18)] + [
+        ('L', [.50 + .27 * math.cos(k * math.pi / 4), .50 + .27 * math.sin(k * math.pi / 4),
+               .50 + .40 * math.cos(k * math.pi / 4), .50 + .40 * math.sin(k * math.pi / 4)])
+        for k in range(8)],
+    'lock': [('R', .24, .14, .52, .38), ('A', .50, .54, .17, -90, 90),
+             ('L', [.33, .54, .33, .46]), ('L', [.67, .54, .67, .46])],
+    'replay': [('A', .50, .48, .30, 40, 340), ('T', .72, .88, .88, .66, .56, .66)],
+    'download': [('L', [.50, .85, .50, .32]), ('L', [.30, .50, .50, .30, .70, .50]),
+                 ('L', [.20, .16, .80, .16])],
+    'upload': [('L', [.50, .30, .50, .83]), ('L', [.30, .65, .50, .85, .70, .65]),
+               ('L', [.20, .16, .80, .16])],
+    'play': [('F', [.30, .18, .30, .82, .82, .50])],
+    'book': [('LC', [.10, .26, .50, .18, .90, .26, .90, .78, .50, .70, .10, .78]),
+             ('L', [.50, .18, .50, .70])],
+    'dot': [('D', .50, .50, .22)],
 }
 
 
-_ATLAS = {'tried': False, 'tex': None, 'mod': None, 'regions': {}}
-
-
-def _icon_region(name):
-    """Texture region of the named icon in ui_icons.png (professionally drawn Phosphor / Material icons),
-    or None when the atlas is missing, so that the vector drawings below still work."""
-    A = _ATLAS
-    if not A['tried']:
-        A['tried'] = True
-        try:
-            import iconatlas
-            for d in (os.path.join(HERE, 'assets', 'icons'), HERE):
-                p = os.path.join(d, 'ui_icons.png')
-                if os.path.exists(p):
-                    tex = CoreImage(p, mipmap=True).texture
-                    if tex is not None and tex.width == iconatlas.SIZE:
-                        try:
-                            tex.min_filter = 'linear_mipmap_linear'
-                            tex.mag_filter = 'linear'
-                        except Exception:
-                            pass
-                        A['tex'], A['mod'] = tex, iconatlas
-                        break
-        except Exception:
-            A['tex'] = None
-    if A['tex'] is None:
-        return None
-    reg = A['regions'].get(name)
-    if reg is None:
-        mod = A['mod']
-        if name not in mod.ATLAS:
-            return None
-        col, row = mod.ATLAS[name]
-        try:
-            reg = A['tex'].get_region(col * mod.CELL, mod.SIZE - (row + 1) * mod.CELL, mod.CELL, mod.CELL)
-        except Exception:
-            return None
-        A['regions'][name] = reg
-    return reg
-
-
 class Icon(Widget):
-    name = StringProperty('play')
+    """Vector icon. Shapes are described in a unit square (see ICONS)."""
+
+    name = StringProperty('')
     color = ListProperty([1, 1, 1, 1])
-    stroke = NumericProperty(1.5)       # in 24-grid units
+    mirror = BooleanProperty(False)
+    filled = BooleanProperty(False)
+    lw = NumericProperty(dp(1.9))
 
     def __init__(self, **kw):
+        super().__init__(**kw)
+        self._trig = Clock.create_trigger(self._draw, -1)
+        self.bind(pos=self._trig, size=self._trig, name=self._trig, color=self._trig,
+                  mirror=self._trig, filled=self._trig, lw=self._trig)
+        self._trig()
+
+    def _draw(self, *args):
+        self.canvas.clear()
+        s = min(self.width, self.height)
+        if s <= 1:
+            return
+        ox = self.center_x - s / 2.0
+        oy = self.center_y - s / 2.0
+        mir = self.mirror
+
+        def X(x):
+            return ox + ((1 - x) if mir else x) * s
+
+        def Y(y):
+            return oy + y * s
+
+        def pts(seq):
+            out = []
+            for i in range(0, len(seq), 2):
+                out += [X(seq[i]), Y(seq[i + 1])]
+            return out
+
+        def fan(seq):
+            p = pts(seq)
+            verts = []
+            for i in range(0, len(p), 2):
+                verts += [p[i], p[i + 1], 0, 0]
+            return Mesh(vertices=verts, indices=list(range(len(p) // 2)),
+                        mode='triangle_fan')
+
+        lw = self.lw
+        with self.canvas:
+            Color(*self.color)
+            for cmd in ICONS.get(self.name, []):
+                k = cmd[0]
+                if k == 'L':
+                    Line(points=pts(cmd[1]), width=lw, cap='round', joint='round')
+                elif k == 'LC':
+                    Line(points=pts(cmd[1]), width=lw, cap='round', joint='round', close=True)
+                elif k == 'F':
+                    fan(cmd[1])
+                elif k == 'T':
+                    fan(list(cmd[1:]))
+                elif k == 'A':
+                    Line(circle=(X(cmd[1]), Y(cmd[2]), cmd[3] * s, cmd[4], cmd[5]),
+                         width=lw, cap='round')
+                elif k == 'C':
+                    Line(circle=(X(cmd[1]), Y(cmd[2]), cmd[3] * s), width=lw)
+                elif k == 'D':
+                    r = cmd[3] * s
+                    Ellipse(pos=(X(cmd[1]) - r, Y(cmd[2]) - r), size=(2 * r, 2 * r))
+                elif k == 'R':
+                    Rectangle(pos=(X(cmd[1]) if not mir else X(cmd[1] + cmd[3]), Y(cmd[2])),
+                              size=(cmd[3] * s, cmd[4] * s))
+                elif k == 'STAR':
+                    sp_ = _star_points(.5, .52, .44, .19)
+                    if self.filled:
+                        p = pts(sp_)
+                        verts = [X(.5), Y(.52), 0, 0]
+                        for i in range(0, len(p), 2):
+                            verts += [p[i], p[i + 1], 0, 0]
+                        verts += [p[0], p[1], 0, 0]
+                        Mesh(vertices=verts, indices=list(range(len(verts) // 4)),
+                             mode='triangle_fan')
+                    else:
+                        Line(points=pts(sp_), width=lw, cap='round', joint='round', close=True)
+
+
+class IconButton(ButtonBehavior, Icon):
+    """Icon with a soft round press feedback."""
+
+    bg = ListProperty([])           # optional filled circle behind the icon
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self._ov = InstructionGroup()
+        self.canvas.before.add(self._ov)
+        self.bind(state=self._on_state, pos=self._ov_draw, size=self._ov_draw, bg=self._ov_draw)
+        self._ov_draw()
+
+    def _ov_draw(self, *a):
+        self._ov.clear()
+        s = min(self.width, self.height)
+        if s <= 1:
+            return
+        if self.bg:
+            self._ov.add(Color(*self.bg))
+            self._ov.add(Ellipse(pos=(self.center_x - s / 2, self.center_y - s / 2), size=(s, s)))
+        if self.state == 'down':
+            self._ov.add(Color(1, 1, 1, 0.14))
+            self._ov.add(Ellipse(pos=(self.center_x - s / 2, self.center_y - s / 2), size=(s, s)))
+
+    def _on_state(self, *a):
+        self._ov_draw()
+
+
+class TintButton(ButtonBehavior, Widget):
+    """Small rounded square with a tinted background and a vector icon inside
+    (used for edit / delete on cards)."""
+
+    def __init__(self, name, color, box=dp(40), **kw):
         kw.setdefault('size_hint', (None, None))
-        kw.setdefault('size', (dp(24), dp(24)))
-        super(Icon, self).__init__(**kw)
-        self.bind(pos=self._draw, size=self._draw, name=self._draw, color=self._draw)
-        self._draw()
+        kw.setdefault('size', (box, box))
+        super().__init__(**kw)
+        self._tint = color
+        with self.canvas.before:
+            self._bgc = Color(color[0], color[1], color[2], 0.15)
+            self._bg = RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(13)])
+            self._lnc = Color(color[0], color[1], color[2], 0.30)
+            self._ln = Line(rounded_rectangle=(self.x, self.y, self.width, self.height, dp(13)),
+                            width=1)
+        self.icon = Icon(name=name, color=color, lw=dp(1.8), size_hint=(None, None))
+        self.add_widget(self.icon)
+        self.bind(pos=self._upd, size=self._upd, state=self._state)
+        self._upd()
+
+    def _upd(self, *a):
+        self._bg.pos = self.pos
+        self._bg.size = self.size
+        self._ln.rounded_rectangle = (self.x, self.y, self.width, self.height, dp(13))
+        side = min(self.width, self.height) * 0.54
+        self.icon.size = (side, side)
+        self.icon.center = self.center
+
+    def _state(self, *a):
+        a_bg = 0.30 if self.state == 'down' else 0.15
+        self._bgc.rgba = (self._tint[0], self._tint[1], self._tint[2], a_bg)
+
+
+# ======================================================================
+# Containers
+# ======================================================================
+class Card(BoxLayout):
+    """Rounded surface with a subtle border."""
+
+    bg = ListProperty([])
+    border = ListProperty([])
+    radius = NumericProperty(dp(18))
+
+    def __init__(self, bg_name='card', **kw):
+        self._bg_name = bg_name
+        kw.setdefault('orientation', 'vertical')
+        kw.setdefault('padding', dp(14))
+        kw.setdefault('spacing', dp(8))
+        super().__init__(**kw)
+        with self.canvas.before:
+            self._c_bg = Color(*(self.bg or C(bg_name)))
+            self._r_bg = RoundedRectangle(pos=self.pos, size=self.size, radius=[self.radius])
+            self._c_bd = Color(*(self.border or C('border')))
+            self._l_bd = Line(rounded_rectangle=(self.x, self.y, self.width, self.height,
+                                                 self.radius), width=1)
+        self.bind(pos=self._upd, size=self._upd, bg=self._upd, border=self._upd,
+                  radius=self._upd)
+
+    def _upd(self, *a):
+        self._c_bg.rgba = self.bg or C(self._bg_name)
+        self._c_bd.rgba = self.border or C('border')
+        self._r_bg.pos = self.pos
+        self._r_bg.size = self.size
+        self._r_bg.radius = [self.radius]
+        self._l_bd.rounded_rectangle = (self.x, self.y, self.width, self.height, self.radius)
+
+
+class TapCard(ButtonBehavior, Card):
+    """Card that can be tapped (children such as icon buttons still work).
+    A soft light veil shows while it is pressed."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        with self.canvas.after:
+            self._veil_c = Color(1, 1, 1, 0)
+            self._veil = RoundedRectangle(pos=self.pos, size=self.size, radius=[self.radius])
+        self.bind(pos=self._veil_upd, size=self._veil_upd, radius=self._veil_upd,
+                  state=self._veil_state)
+
+    def _veil_upd(self, *a):
+        self._veil.pos = self.pos
+        self._veil.size = self.size
+        self._veil.radius = [self.radius]
+
+    def _veil_state(self, *a):
+        self._veil_c.rgba = (1, 1, 1, 0.07) if self.state == 'down' else (1, 1, 1, 0)
+
+
+def auto_card(**kw):
+    """Card whose height follows its content."""
+    kw.setdefault('size_hint_y', None)
+    c = Card(**kw)
+    c.bind(minimum_height=c.setter('height'))
+    return c
+
+
+class Divider(Widget):
+    """Visual separator between list items. Shape / thickness / colour are
+    controlled from the Settings screen (solid, dashed, dotted, fade, ornament)."""
+
+    style = StringProperty('solid')
+    thickness = NumericProperty(1)
+    color = ListProperty([0.5, 0.5, 0.5, 1])
+
+    _grad = None
+
+    @classmethod
+    def gradient(cls):
+        if cls._grad is None:
+            n = 64
+            buf = bytearray()
+            for i in range(n):
+                a = math.sin(math.pi * i / (n - 1))
+                buf += bytes([255, 255, 255, int(255 * a)])
+            tex = Texture.create(size=(n, 1), colorfmt='rgba')
+            tex.blit_buffer(bytes(buf), colorfmt='rgba', bufferfmt='ubyte')
+            tex.mag_filter = 'linear'
+            cls._grad = tex
+        return cls._grad
+
+    def __init__(self, **kw):
+        kw.setdefault('size_hint_y', None)
+        kw.setdefault('height', dp(14))
+        super().__init__(**kw)
+        self._trig = Clock.create_trigger(self._draw, -1)
+        self.bind(pos=self._trig, size=self._trig, style=self._trig,
+                  thickness=self._trig, color=self._trig)
+        self._trig()
 
     def _draw(self, *a):
         self.canvas.clear()
-        if self.width < 2:
+        w, h = self.size
+        if w <= 2:
             return
-        reg = _icon_region(self.name)
-        if reg is not None:
-            d = min(self.width, self.height) * 0.9          # the drawings fill their whole square
-            with self.canvas:
-                Color(*self.color)
-                Rectangle(texture=reg, pos=(self.x + (self.width - d) / 2.0, self.y + (self.height - d) / 2.0),
-                          size=(d, d))
-            return
-        ops = ICONS.get(self.name)
-        if not ops:
-            return
-        u = min(self.width, self.height) / 24.0
-        ox = (self.x + self.width / 2.0) - 12 * u
-        oy = (self.y + self.height / 2.0) - 12 * u
-
-        def P(x, y):
-            return ox + x * u, oy + (24 - y) * u
-        lw = max(1.2, self.stroke * 0.82 * u)
+        t = dp(1.3) * max(1, float(self.thickness))
+        y = self.center_y
+        m = dp(6)
+        x0, x1 = self.x + m, self.right - m
         with self.canvas:
             Color(*self.color)
-            for op in ops:
-                k = op[0]
-                if k == 'line':
-                    pts = []
-                    for (x, y) in op[1]:
-                        pts.extend(P(x, y))
-                    Line(points=pts, width=lw, cap='round', joint='round')
-                elif k == 'fill':
-                    verts = []
-                    for (x, y) in op[1]:
-                        px, py = P(x, y)
-                        verts.extend([px, py, 0, 0])
-                    Mesh(vertices=verts, indices=list(range(len(op[1]))), mode='triangle_fan')
-                elif k == 'rect':
-                    _, x, y, w, h = op
-                    px, py = P(x, y + h)
-                    Rectangle(pos=(px, py), size=(w * u, h * u))
-                elif k == 'circle':
-                    _, cx, cy, r = op
-                    px, py = P(cx, cy)
-                    Line(circle=(px, py, r * u), width=lw)
-                elif k == 'dot':
-                    _, cx, cy, r = op
-                    px, py = P(cx, cy)
-                    Ellipse(pos=(px - r * u, py - r * u), size=(2 * r * u, 2 * r * u))
+            st = self.style
+            if st == 'dashed':
+                dash, gap = dp(8), dp(5)
+                x = x0
+                while x < x1:
+                    Rectangle(pos=(x, y - t / 2), size=(min(dash, x1 - x), t))
+                    x += dash + gap
+            elif st == 'dotted':
+                r = max(dp(1.2), t * 0.75)
+                step = r * 4.2
+                x = x0 + r
+                while x < x1 - r:
+                    Ellipse(pos=(x - r, y - r), size=(2 * r, 2 * r))
+                    x += step
+            elif st == 'fade':
+                Rectangle(texture=self.gradient(), pos=(x0, y - t / 2), size=(x1 - x0, t))
+            elif st == 'ornament':
+                cx = self.center_x
+                gap = dp(14)
+                Rectangle(texture=self.gradient(), pos=(x0, y - t / 2),
+                          size=(cx - gap - x0, t))
+                Rectangle(texture=self.gradient(), pos=(cx + gap, y - t / 2),
+                          size=(x1 - cx - gap, t))
+                s = dp(4) + t
+                Mesh(vertices=[cx, y + s, 0, 0, cx + s, y, 0, 0, cx, y - s, 0, 0,
+                               cx - s, y, 0, 0], indices=[0, 1, 2, 3], mode='triangle_fan')
+            else:
+                Rectangle(pos=(x0, y - t / 2), size=(x1 - x0, t))
 
 
-# ---------------------------------------------------------------------------
-# tap targets
-# ---------------------------------------------------------------------------
-TAP_SLOP = dp(12)           # a finger that travels further than this between down and up did not tap
+class BarProgress(Widget):
+    value = NumericProperty(0)      # 0..1
+    fg = ListProperty([])
+    bg = ListProperty([])
+
+    def __init__(self, **kw):
+        kw.setdefault('size_hint_y', None)
+        kw.setdefault('height', dp(8))
+        super().__init__(**kw)
+        self._trig = Clock.create_trigger(self._draw, -1)
+        self.bind(pos=self._trig, size=self._trig, value=self._trig, fg=self._trig, bg=self._trig)
+        self._trig()
+
+    def _draw(self, *a):
+        self.canvas.clear()
+        r = self.height / 2.0
+        v = max(0.0, min(1.0, self.value))
+        if rtl.UI_RTL:
+            fill_x = self.right - self.width * v
+        else:
+            fill_x = self.x
+        with self.canvas:
+            Color(*(self.bg or C('card2')))
+            RoundedRectangle(pos=self.pos, size=self.size, radius=[r])
+            if v > 0:
+                Color(*(self.fg or C('primary')))
+                RoundedRectangle(pos=(fill_x, self.y),
+                                 size=(max(self.height, self.width * v), self.height),
+                                 radius=[r])
 
 
-class Tap(Widget):
-    """Plain touch target with press feedback; callback(widget) on release."""
+# ======================================================================
+# Buttons & controls
+# ======================================================================
+class RButton(ButtonBehavior, ALabel):
+    """Rounded button (also used for chips and list rows)."""
 
-    def __init__(self, callback=None, **kw):
-        kw.setdefault('size_hint', (1, None))
-        if 'size' not in kw:
-            kw.setdefault('height', dp(52))
-        super(Tap, self).__init__(**kw)
-        self.callback = callback
-        self.pressed = False
-        self.long_callback = None
-        self._long_ev = None
-        self._long_fired = False
-        self._fb = None
-        self.fb_radius = None              # corner radii of the press highlight (cards)
-        self.bind(pos=self._fb_upd, size=self._fb_upd)
+    bg = ListProperty([0.3, 0.4, 0.9, 1])
+    radius = NumericProperty(dp(14))
+    outline = ListProperty([])
+    click_sound = BooleanProperty(True)
 
-    def _fb_upd(self, *a):
-        if self._fb is not None:
-            self._fb.pos = self.pos
-            self._fb.size = self.size
+    def __init__(self, **kw):
+        kw.setdefault('align', 'center')
+        kw.setdefault('bold', True)
+        kw.setdefault('font_size', sp(15))
+        super().__init__(**kw)
+        with self.canvas.before:
+            self._c = Color(*self.bg)
+            self._r = RoundedRectangle(pos=self.pos, size=self.size, radius=[self.radius])
+            self._co = Color(0, 0, 0, 0)
+            self._lo = Line(rounded_rectangle=(self.x, self.y, self.width, self.height,
+                                               self.radius), width=1.2)
+            self._cp = Color(1, 1, 1, 0)
+            self._rp = RoundedRectangle(pos=self.pos, size=self.size, radius=[self.radius])
+        self.bind(pos=self._upd, size=self._upd, bg=self._upd, radius=self._upd,
+                  outline=self._upd, state=self._on_state, disabled=self._on_disabled)
+        self._upd()
 
-    def _set_pressed(self, v):
-        self.pressed = v
-        self.canvas.after.clear()
-        self._fb = None
-        if v:
-            with self.canvas.after:
-                Color(1, 1, 1, 0.09)
-                if self.fb_radius:
-                    self._fb = RoundedRectangle(pos=self.pos, size=self.size, radius=self.fb_radius)
-                else:
-                    self._fb = Rectangle(pos=self.pos, size=self.size)
+    def _upd(self, *a):
+        self._c.rgba = self.bg
+        for r in (self._r, self._rp):
+            r.pos = self.pos
+            r.size = self.size
+            r.radius = [self.radius]
+        if self.outline:
+            self._co.rgba = self.outline
+        else:
+            self._co.rgba = (0, 0, 0, 0)
+        self._lo.rounded_rectangle = (self.x, self.y, self.width, self.height, self.radius)
 
-    def on_touch_down(self, touch):
-        if self.disabled or not self.collide_point(*touch.pos):
-            return False
-        touch.grab(self)
-        self._long_fired = False
-        self._down = (touch.x, touch.y)
-        self._set_pressed(True)
-        if self.long_callback:
-            self._long_ev = Clock.schedule_once(self._long, 0.45)
-        return True
+    def _on_state(self, *a):
+        self._cp.rgba = (1, 1, 1, 0.16) if self.state == 'down' else (1, 1, 1, 0)
 
-    def tap_now(self):
-        """A tap decided by a scroll container (it tracked the finger itself): flash, then call back."""
-        if self.disabled:
-            return
-        self._set_pressed(True)
-        Clock.schedule_once(self._unflash, 0.09)
-        if self.callback:
-            self.callback(self)
+    def _on_disabled(self, *a):
+        self.opacity = 0.45 if self.disabled else 1
 
-    def _unflash(self, dt):
-        self._set_pressed(False)
-
-    def _long(self, dt):
-        self._long_ev = None
-        if self.pressed:
-            self._long_fired = True
-            self._set_pressed(False)
-            self.long_callback(self)
-
-    def on_touch_move(self, touch):
-        if touch.grab_current is self:
-            d = getattr(self, '_down', None)
-            slipped = d is not None and (abs(touch.x - d[0]) > TAP_SLOP or abs(touch.y - d[1]) > TAP_SLOP)
-            if self.pressed and (slipped or not self.collide_point(*touch.pos)):   # a drag is not a tap
-                self._set_pressed(False)
-                if self._long_ev:
-                    self._long_ev.cancel()
-                    self._long_ev = None
-            return True
-        return False
-
-    def on_touch_up(self, touch):
-        if touch.grab_current is self:
-            touch.ungrab(self)
-            if self._long_ev:
-                self._long_ev.cancel()
-                self._long_ev = None
-            was = self.pressed
-            self._set_pressed(False)
-            if was and not self._long_fired and self.callback:
-                self.callback(self)
-            return True
-        return False
+    def on_press(self):
+        if self.click_sound:
+            from kivy.app import App
+            app = App.get_running_app()
+            sfx = getattr(app, 'sfx', None)
+            if sfx:
+                sfx.play('click')
 
 
-class IconButton(Tap):
-    def __init__(self, icon='play', callback=None, color=None, icon_size=None, bg=None, bg_d=None, **kw):
+def button(text, on_release=None, style='primary', height=None, size=15, icon=None, **kw):
+    """Convenience factory. style: primary | soft | ghost | danger | success"""
+    if style == 'primary':
+        bg, fg, outline = C('primary'), C('on_primary'), []
+    elif style == 'danger':
+        bg, fg, outline = C('danger'), (1, 1, 1, 1), []
+    elif style == 'success':
+        bg, fg, outline = C('success'), (1, 1, 1, 1), []
+    elif style == 'ghost':
+        bg, fg, outline = [0, 0, 0, 0], C('text'), C('border')
+    else:
+        bg, fg, outline = C('card2'), C('text'), []
+    kw.setdefault('size_hint_y', None)
+    kw['height'] = height or dp(48)
+    b = RButton(raw=text, bg=bg, color=fg, outline=outline, font_size=sp(size), **kw)
+    if on_release:
+        b.bind(on_release=lambda *_: on_release())
+    return b
+
+
+class Toggle(ButtonBehavior, Widget):
+    """Pill switch."""
+
+    active = BooleanProperty(False)
+    _pos = NumericProperty(0.0)
+
+    def __init__(self, **kw):
         kw.setdefault('size_hint', (None, None))
-        kw.setdefault('size', (dp(48), dp(48)))
-        super(IconButton, self).__init__(callback=callback, **kw)
-        self.bg = bg
-        self.bg_d = bg_d                      # disc diameter (default: the whole button)
-        self.bind(pos=self._draw_bg, size=self._draw_bg)
-        isz = icon_size or dp(24)
-        self.icon = Icon(name=icon, size=(isz, isz), color=list(color or TEXT))
-        self.add_widget(self.icon)
-        self.bind(pos=self._sync, size=self._sync)
-        self._sync()
+        kw.setdefault('size', (dp(50), dp(28)))
+        super().__init__(**kw)
+        self._pos = 1.0 if self.active else 0.0
+        self._trig = Clock.create_trigger(self._draw, -1)
+        self.bind(pos=self._trig, size=self._trig, _pos=self._trig, active=self._animate)
+        self._trig()
 
-    def _draw_bg(self, *a):
-        self.canvas.before.clear()
-        if self.bg:
-            d = self.bg_d or min(self.width, self.height)
-            with self.canvas.before:
-                Color(*self.bg)
-                Ellipse(pos=(self.x + (self.width - d) / 2.0, self.y + (self.height - d) / 2.0), size=(d, d))
+    def _animate(self, *a):
+        Animation(_pos=1.0 if self.active else 0.0, d=0.14).start(self)
 
-    def _sync(self, *a):
-        self.icon.center = (self.x + self.width / 2.0, self.y + self.height / 2.0)
-
-    def set_icon(self, name):
-        self.icon.name = name
-
-    def set_color(self, c):
-        self.icon.color = list(c)
-
-    def _set_pressed(self, v):
-        self.pressed = v
-        self.icon.opacity = 0.55 if v else 1.0
-
-    def on_touch_down(self, touch):
-        if self.disabled or not self.collide_point(*touch.pos):
-            return False
-        return Tap.on_touch_down(self, touch)
-
-
-class PillSwitch(Tap):
-    value = BooleanProperty(False)
-    k = NumericProperty(0.0)                     # 0 = off ... 1 = on (animated)
-
-    def __init__(self, value=False, on_change=None, **kw):
-        kw.setdefault('size_hint', (None, None))
-        kw.setdefault('size', (dp(46), dp(28)))
-        super(PillSwitch, self).__init__(callback=self._toggle, **kw)
-        self.on_change = on_change
-        self.value = value
-        self.k = 1.0 if value else 0.0
-        self.bind(pos=self._draw, size=self._draw, k=self._draw)
-        self.bind(value=self._slide)
-        self._draw()
-
-    def _slide(self, inst, v):
-        Animation.cancel_all(self, 'k')
-        if self.get_root_window() is None:
-            self.k = 1.0 if v else 0.0
-            return
-        Animation(k=1.0 if v else 0.0, d=0.14, transition='out_quad').start(self)
-
-    def _toggle(self, *a):
-        self.value = not self.value
-        if self.on_change:
-            self.on_change(self.value)
-
-    def _set_pressed(self, v):
-        self.pressed = v
+    def on_release(self):
+        self.active = not self.active
 
     def _draw(self, *a):
         self.canvas.clear()
         h = self.height
-        k = max(0.0, min(1.0, self.k))
+        r = h / 2.0
         with self.canvas:
-            off = (0.19, 0.20, 0.235)                                # quiet grey track
-            Color(off[0] + (ACCENT[0] - off[0]) * k, off[1] + (ACCENT[1] - off[1]) * k,
-                  off[2] + (ACCENT[2] - off[2]) * k, 1)
-            RoundedRectangle(pos=self.pos, size=self.size, radius=[h / 2.0])
-            r = h * (0.28 + 0.08 * k)
-            pad = h / 2.0
-            cx = (self.x + pad) + ((self.x + self.width - pad) - (self.x + pad)) * k
-            cy = self.y + self.height / 2.0
-            if k > 0.05:
-                Color(0, 0, 0, 0.18 * k)                              # soft shadow under the knob
-                Ellipse(pos=(cx - r, cy - r - dp(1)), size=(2 * r, 2 * r))
-            Color(0.72 + 0.28 * k, 0.74 + 0.26 * k, 0.79 + 0.21 * k, 1)
-            Ellipse(pos=(cx - r, cy - r), size=(2 * r, 2 * r))
-
-
-class Chip(Tap):
-    def __init__(self, label, selected=False, callback=None, **kw):
-        kw.setdefault('height', dp(40))
-        super(Chip, self).__init__(callback=callback, **kw)
-        self.selected = selected
-        self.label = Txt(ltext=label, halign='center', font_size=sp(15), bold=selected,
-                         color=ON_ACCENT if selected else TEXT, size_hint=(None, None))
-        self.add_widget(self.label)
-        self.bind(pos=self._draw, size=self._draw)
-        self._draw()
-
-    def _draw(self, *a):
-        self.canvas.before.clear()
-        with self.canvas.before:
-            Color(*(ACCENT if self.selected else SURFACE2))
-            RoundedRectangle(pos=self.pos, size=self.size, radius=[self.height / 2.0])
-        self.label.pos = self.pos
-        self.label.size = self.size
-
-
-# ---------------------------------------------------------------------------
-# thumbnails
-# ---------------------------------------------------------------------------
-_tex_cache = OrderedDict()
-_loader_state = {'broken': False}
-
-
-def _remember(path, tex):
-    _tex_cache[path] = tex
-    _tex_cache.move_to_end(path)
-    while len(_tex_cache) > 150:
-        _tex_cache.popitem(last=False)
-
-
-def load_texture(path):
-    """Decode a picture right now (blocks for a few ms)."""
-    tex = _tex_cache.get(path)
-    if tex is not None:
-        _tex_cache.move_to_end(path)
-        return tex
-    try:
-        tex = CoreImage(path, nocache=True).texture
-    except Exception:
-        return None
-    _remember(path, tex)
-    return tex
-
-
-def _is_error_image(proxy):
-    try:
-        from kivy.loader import Loader
-        return getattr(proxy, 'image', None) is Loader.error_image
-    except Exception:
-        return False
-
-
-def load_texture_async(path, done):
-    """done(texture or None) is called on the main thread: at once when the picture is already
-    cached, otherwise after Kivy's loader decoded it on a worker thread (so scrolling never waits
-    for a JPEG).  Falls back to decoding right now if the loader is unusable."""
-    tex = _tex_cache.get(path)
-    if tex is not None:
-        _tex_cache.move_to_end(path)
-        done(tex)
-        return
-    if not _loader_state['broken']:
-        try:
-            from kivy.loader import Loader
-            proxy = Loader.image(path, nocache=True)
-
-            def on_load(p, path=path):
-                tex = None
-                if not _is_error_image(p):
-                    try:
-                        tex = p.texture
-                    except Exception:
-                        tex = None
-                if tex is not None:
-                    _remember(path, tex)
-                done(tex)
-            if proxy.loaded:
-                on_load(proxy)
-            else:
-                proxy.bind(on_load=on_load)
-            return
-        except Exception:
-            _loader_state['broken'] = True
-    done(load_texture(path))
-
-
-class Thumb(Widget):
-    """Rounded, centre-cropped picture with a dark placeholder."""
-
-    def __init__(self, radius=None, **kw):
-        kw.setdefault('size_hint', (None, None))
-        super(Thumb, self).__init__(**kw)
-        self.radius = radius if radius is not None else dp(12)
-        self.source = None
-        self._tex = None
-        self._req = 0
-        self._ev = None
-        self.bind(pos=self._draw, size=self._draw)
-
-    def set_source(self, path):
-        if path == self.source:
-            return
-        self.source = path
-        self._req += 1
-        if self._ev is not None:
-            self._ev.cancel()
-            self._ev = None
-        if not path:
-            self._tex = None
-        else:
-            tex = _tex_cache.get(path)
-            if tex is not None:
-                _tex_cache.move_to_end(path)
-                self._tex = tex
-            else:
-                self._tex = None
-                # a row that is scrolling past changes its picture every few frames: wait a
-                # moment so that only pictures which stay on screen get decoded
-                req = self._req
-                self._ev = Clock.schedule_once(lambda dt, p=path, r=req: self._start_load(p, r), 0.02)
-        self._draw()
-
-    def _start_load(self, path, req):
-        self._ev = None
-        if req != self._req:
-            return
-
-        def done(tex, req=req):
-            if req == self._req and tex is not None:
-                self._tex = tex
-                self._draw()
-        load_texture_async(path, done)
-
-    def _draw(self, *a):
-        self.canvas.clear()
-        if self.width < 2:
-            return
-        with self.canvas:
-            tex = self._tex
-            if tex is None:
-                # no picture (yet): a calm panel with a play mark instead of a black hole
-                Color(0.105, 0.11, 0.14, 1)
-                RoundedRectangle(pos=self.pos, size=self.size, radius=[self.radius])
-                m = min(self.width, self.height) * 0.15
-                cx, cy = self.x + self.width / 2.0, self.y + self.height / 2.0
-                Color(1, 1, 1, 0.13)
-                Triangle(points=[cx - m * 0.8, cy - m, cx - m * 0.8, cy + m, cx + m * 1.1, cy])
-            else:
-                Color(0.02, 0.02, 0.025, 1)
-                RoundedRectangle(pos=self.pos, size=self.size, radius=[self.radius])
-            if tex is not None:
-                tw, th = tex.size
-                if tw > 0 and th > 0:
-                    # "contain": the whole picture, black bars at the sides for tall videos
-                    k = min(self.width / float(tw), self.height / float(th))
-                    dw, dh = tw * k, th * k
-                    Color(1, 1, 1, 1)
-                    if dw >= self.width - 1 and dh >= self.height - 1:
-                        RoundedRectangle(pos=self.pos, size=self.size, radius=[self.radius], texture=tex)
-                    else:
-                        Rectangle(pos=(self.x + (self.width - dw) / 2.0, self.y + (self.height - dh) / 2.0),
-                                  size=(dw, dh), texture=tex)
-
-
-# ---------------------------------------------------------------------------
-# seek bar
-# ---------------------------------------------------------------------------
-class SeekBar(Widget):
-    value = NumericProperty(0.0)       # 0..1
-
-    def __init__(self, on_start=None, on_move=None, on_end=None, **kw):
-        kw.setdefault('size_hint', (1, None))
-        kw.setdefault('height', dp(36))
-        super(SeekBar, self).__init__(**kw)
-        self.on_start, self.on_move, self.on_end = on_start, on_move, on_end
-        self.dragging = False
-        self.bind(pos=self._draw, size=self._draw, value=self._draw)
-        self._draw()
-
-    def thumb_x(self):
-        pad = dp(10)
-        return self.x + pad + max(1.0, self.width - 2 * pad) * max(0.0, min(1.0, self.value))
-
-    def _frac(self, x):
-        pad = dp(10)
-        w = max(1.0, self.width - 2 * pad)
-        return max(0.0, min(1.0, (x - self.x - pad) / w))
-
-    def _draw(self, *a):
-        self.canvas.clear()
-        pad = dp(10)
-        w = max(1.0, self.width - 2 * pad)
-        th = dp(4) if not self.dragging else dp(6)
-        cy = self.y + self.height / 2.0
-        y = cy - th / 2.0
-        v = max(0.0, min(1.0, self.value))
-        with self.canvas:
-            Color(1, 1, 1, 0.24)
-            RoundedRectangle(pos=(self.x + pad, y), size=(w, th), radius=[th / 2.0])
-            Color(*ACCENT)
-            RoundedRectangle(pos=(self.x + pad, y), size=(max(th, w * v), th), radius=[th / 2.0])
-            kx = self.x + pad + w * v
-            if self.dragging:
-                Color(ACCENT[0], ACCENT[1], ACCENT[2], 0.28)           # halo while the finger is down
-                Ellipse(pos=(kx - dp(15), cy - dp(15)), size=(dp(30), dp(30)))
-            r = dp(7.5) if not self.dragging else dp(10)
-            Color(0, 0, 0, 0.25)
-            Ellipse(pos=(kx - r, cy - r - dp(1)), size=(2 * r, 2 * r))
+            Color(*mix(C('chip'), C('primary'), self._pos))
+            RoundedRectangle(pos=self.pos, size=self.size, radius=[r])
             Color(1, 1, 1, 1)
-            Ellipse(pos=(kx - r, cy - r), size=(2 * r, 2 * r))
+            kr = r - dp(3)
+            kx = self.x + dp(3) + (self.width - h) * self._pos
+            Ellipse(pos=(kx, self.y + dp(3)), size=(2 * kr, 2 * kr))
+
+
+class Segmented(BoxLayout):
+    """Row of exclusive choices. options = [(value, label_text), ...]"""
+
+    value = StringProperty('')
+
+    def __init__(self, options, value, on_change=None, height=None, size=14, **kw):
+        kw.setdefault('size_hint_y', None)
+        kw['height'] = height or dp(42)
+        kw.setdefault('spacing', dp(6))
+        super().__init__(orientation='horizontal', **kw)
+        self._options = options
+        self._on_change = on_change
+        self._size = size
+        self._buttons = {}
+        self.value = value
+        btns = []
+        for val, text in options:
+            b = RButton(raw=text, font_size=sp(size), radius=dp(12), bold=True)
+            b.bind(on_release=lambda inst, v=val: self.select(v))
+            self._buttons[val] = b
+            btns.append(b)
+        add_row(self, btns)
+        self._paint()
+
+    def _paint(self):
+        for val, b in self._buttons.items():
+            if val == self.value:
+                b.bg = C('primary')
+                b.color = C('on_primary')
+                b.outline = []
+            else:
+                b.bg = C('card2')
+                b.color = C('sub')
+                b.outline = []
+
+    def select(self, val, fire=True):
+        self.value = val
+        self._paint()
+        if fire and self._on_change:
+            self._on_change(val)
+
+
+class ColorDots(BoxLayout):
+    """Row of colour swatches. colors = list of RGBA (None = 'no colour').
+    The swatches share the available width, so the row never overflows."""
+
+    selected = NumericProperty(0)
+
+    def __init__(self, colors, selected=0, on_change=None, dot=dp(36), **kw):
+        kw.setdefault('size_hint_y', None)
+        kw['height'] = dot + dp(8)
+        kw.setdefault('spacing', dp(4))
+        super().__init__(orientation='horizontal', **kw)
+        self.colors = colors
+        self.selected = selected
+        self._on_change = on_change
+        self._dots = []
+        items = []
+        for i, col in enumerate(colors):
+            d = _Dot(index=i, rgba=col)
+            d.bind(on_release=lambda inst: self._pick(inst.index))
+            self._dots.append(d)
+            items.append(d)
+        add_row(self, items)
+        self._paint()
+
+    def _pick(self, i):
+        self.selected = i
+        self._paint()
+        if self._on_change:
+            self._on_change(i)
+
+    def _paint(self):
+        for d in self._dots:
+            d.active = (d.index == self.selected)
+
+
+class _Dot(ButtonBehavior, Widget):
+    index = NumericProperty(0)
+    rgba = ObjectProperty(None, allownone=True)
+    active = BooleanProperty(False)
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self._trig = Clock.create_trigger(self._draw, -1)
+        self.bind(pos=self._trig, size=self._trig, active=self._trig, rgba=self._trig)
+        self._trig()
+
+    def _draw(self, *a):
+        self.canvas.clear()
+        s = min(self.width, self.height)
+        cx, cy = self.center_x, self.center_y
+        with self.canvas:
+            if self.rgba is None:
+                Color(*C('card2'))
+                Ellipse(pos=(cx - s / 2, cy - s / 2), size=(s, s))
+                Color(*C('sub'))
+                Line(points=[cx - s * .22, cy - s * .22, cx + s * .22, cy + s * .22],
+                     width=dp(1.6), cap='round')
+                Line(points=[cx - s * .22, cy + s * .22, cx + s * .22, cy - s * .22],
+                     width=dp(1.6), cap='round')
+            else:
+                Color(*self.rgba[:3], 1)
+                Ellipse(pos=(cx - s * .42, cy - s * .42), size=(s * .84, s * .84))
+            if self.active:
+                Color(*C('text'))
+                Line(circle=(cx, cy, s * .5 - dp(1)), width=dp(2))
+
+
+class _DayDot(Widget):
+    """One day of the week strip: filled = studied, ring = today."""
+
+    studied = BooleanProperty(False)
+    today = BooleanProperty(False)
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self._trig = Clock.create_trigger(self._draw, -1)
+        self.bind(pos=self._trig, size=self._trig, studied=self._trig, today=self._trig)
+        self._trig()
+
+    def _draw(self, *a):
+        self.canvas.clear()
+        s = min(self.width, self.height)
+        if s <= 1:
+            return
+        cx, cy = self.center_x, self.center_y
+        r = s / 2.0
+        with self.canvas:
+            if self.studied:
+                Color(*C('accent'))
+                Ellipse(pos=(cx - r, cy - r), size=(2 * r, 2 * r))
+                Color(1, 1, 1, 1)
+                Line(points=[cx - r * .36, cy - r * .02, cx - r * .10, cy - r * .30,
+                             cx + r * .40, cy + r * .28], width=dp(1.9), cap='round',
+                     joint='round')
+            else:
+                Color(*C('card2'))
+                Ellipse(pos=(cx - r, cy - r), size=(2 * r, 2 * r))
+            if self.today:
+                Color(*(C('accent') if self.studied else C('primary')))
+                Line(circle=(cx, cy, r + dp(3)), width=dp(1.6))
+
+
+class WeekStrip(BoxLayout):
+    """Seven small circles for the last seven days (chronological, follows RTL)."""
+
+    def __init__(self, days, letters, **kw):
+        kw.setdefault('size_hint_y', None)
+        kw.setdefault('height', dp(58))
+        kw.setdefault('spacing', dp(4))
+        super().__init__(orientation='horizontal', **kw)
+        cells = []
+        for dd, studied, today in days:
+            col = BoxLayout(orientation='vertical', spacing=dp(3))
+            holder = BoxLayout(padding=[0, dp(4)])
+            holder.add_widget(_DayDot(studied=studied, today=today))
+            col.add_widget(holder)
+            col.add_widget(ALabel(raw=letters[dd.weekday()], font_size=sp(12), bold=today,
+                                  color=C('text') if today else C('sub'), align='center',
+                                  size_hint_y=None, height=dp(18)))
+            cells.append(col)
+        add_row(self, cells)
+
+
+# ======================================================================
+# Flame (daily streak)
+# ======================================================================
+_FLAME_CTRL = [
+    (.50, .02), (.78, .10), (.93, .30), (.89, .52), (.72, .68), (.63, .84),
+    (.52, .99), (.43, .80), (.37, .64), (.27, .72), (.14, .52), (.09, .30),
+    (.23, .10),
+]
+
+# streak days -> (outer colour, core colour)
+_FLAME_STOPS = [
+    (0, ((.38, .38, .40), (.62, .62, .64))),
+    (1, ((1.0, .66, .05), (1.0, .96, .45))),
+    (3, ((1.0, .45, .02), (1.0, .88, .25))),
+    (7, ((.96, .24, .03), (1.0, .74, .12))),
+    (14, ((.80, .08, .06), (1.0, .58, .10))),
+    (30, ((.52, .02, .06), (1.0, .46, .10))),
+]
+
+
+def flame_colors(days):
+    """Outer + core colour of the flame for a streak length (smooth gradient
+    from yellow to dark red)."""
+    if days <= 0:
+        a = _FLAME_STOPS[0][1]
+        return a[0], a[1]
+    for i in range(len(_FLAME_STOPS) - 1):
+        d0, c0 = _FLAME_STOPS[i]
+        d1, c1 = _FLAME_STOPS[i + 1]
+        if d0 <= days <= d1:
+            t = (days - d0) / float(d1 - d0)
+            outer = tuple(c0[0][k] + (c1[0][k] - c0[0][k]) * t for k in range(3))
+            core = tuple(c0[1][k] + (c1[1][k] - c0[1][k]) * t for k in range(3))
+            return outer, core
+    return _FLAME_STOPS[-1][1][0], _FLAME_STOPS[-1][1][1]
+
+
+def _catmull(points, seg=8):
+    n = len(points)
+    out = []
+    for i in range(n):
+        p0 = points[(i - 1) % n]
+        p1 = points[i]
+        p2 = points[(i + 1) % n]
+        p3 = points[(i + 2) % n]
+        for s in range(seg):
+            t = s / float(seg)
+            t2, t3 = t * t, t * t * t
+            x = 0.5 * ((2 * p1[0]) + (-p0[0] + p2[0]) * t +
+                       (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2 +
+                       (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3)
+            y = 0.5 * ((2 * p1[1]) + (-p0[1] + p2[1]) * t +
+                       (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2 +
+                       (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3)
+            out.append((x, y))
+    return out
+
+
+_FLAME_OUTLINE = _catmull(_FLAME_CTRL)
+
+
+_FLAME_TEX = {}
+
+
+def _flame_texture(name):
+    if name not in _FLAME_TEX:
+        tex = None
+        path = find_asset(name)
+        if path:
+            try:
+                from kivy.core.image import Image as CoreImage
+                tex = CoreImage(path, mipmap=True).texture
+                tex.mag_filter = 'linear'
+                tex.min_filter = 'linear_mipmap_linear'
+            except Exception:                               # noqa: BLE001
+                tex = None
+        _FLAME_TEX[name] = tex
+    return _FLAME_TEX[name]
+
+
+class FlameWidget(Widget):
+    """Fire icon built from three tinted layers (body, glowing tip, hot core) so the
+    flame shows a real gradient.  The colours follow the streak length."""
+
+    days = NumericProperty(0)
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self._trig = Clock.create_trigger(self._draw, -1)
+        self.bind(pos=self._trig, size=self._trig, days=self._trig)
+        self._trig()
+
+    def _draw(self, *a):
+        self.canvas.clear()
+        s = min(self.width, self.height)
+        if s <= 2:
+            return
+        pos = (self.center_x - s / 2.0, self.center_y - s / 2.0)
+        outer, core = flame_colors(int(self.days))
+        body = _flame_texture('flame_body.png')
+        with self.canvas:
+            if self.days >= 7:
+                Color(outer[0], outer[1], outer[2], 0.14)
+                g = s * 1.05
+                Ellipse(pos=(self.center_x - g / 2, self.center_y - g / 2), size=(g, g))
+            if body is None:                                # asset missing
+                Color(outer[0], outer[1], outer[2], 1)
+                Ellipse(pos=(pos[0] + s * .15, pos[1]), size=(s * .7, s * .85))
+                return
+            Color(outer[0], outer[1], outer[2], 1)
+            Rectangle(texture=body, pos=pos, size=(s, s))
+            Color(core[0], core[1], core[2], 1)
+            Rectangle(texture=_flame_texture('flame_top.png'), pos=pos, size=(s, s))
+            lit = (1.0, .97, .78, 1) if self.days > 0 else (.82, .82, .84, 1)
+            Color(*lit)
+            Rectangle(texture=_flame_texture('flame_core.png'), pos=pos, size=(s, s))
+
+
+# ======================================================================
+# Text inputs
+# ======================================================================
+# ======================================================================
+# In-app keyboard (Arabic / English / symbols)
+# ======================================================================
+# Android's own keyboard fails to open on some phones when requested from a Kivy
+# app, so typing uses this keyboard by default (Settings -> in-app keyboard).
+VK = {'mode': 'auto'}      # auto | inapp | phone
+_VK_STATE = {'uid': None, 'widget': None}
+
+_KB_EN = [list('qwertyuiop'), list('asdfghjkl'), ['SHIFT'] + list('zxcvbnm') + ['BACK']]
+_KB_AR = [list('ضصثقفغعهخحج'), list('شسيبلاتنمكط'),
+          list('ئءؤرىةوزظدذ') + ['BACK']]
+_KB_SYM = [list('1234567890'), list('-/:;()$&@"'), ['.', ',', '?', '!', "'", '_', '+', '=', '%', 'BACK']]
+_KB_AR_SYM = [list('٠١٢٣٤٥٦٧٨٩'), list('-/:;()$&@"'), ['.', '،', '؟', '!', "'", '_', '+', '=', '%', 'BACK']]
+
+
+class _Key(ButtonBehavior, Widget):
+    def __init__(self, kind, text, on_key, style='key', **kw):
+        super().__init__(**kw)
+        self.kind, self.text_, self.on_key, self.style = kind, text, on_key, style
+        with self.canvas.before:
+            self._c = Color(*self._col(False))
+            self._r = RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(9)])
+        self.lbl = ALabel(raw=text, font_size=sp(19 if len(text) < 3 else 14), bold=True,
+                          color=self._fg(), align='center', size_hint=(None, None))
+        self.add_widget(self.lbl)
+        self.bind(pos=self._upd, size=self._upd, state=lambda *a: self._paint())
+        self._upd()
+
+    def _col(self, down):
+        if self.style == 'primary':
+            return mix(C('primary'), (0, 0, 0, 1), 0.2) if down else C('primary')
+        if self.style == 'fn':
+            return alpha(C('text'), 0.22) if down else alpha(C('text'), 0.12)
+        return alpha(C('text'), 0.26) if down else C('card2') if THEME.is_dark else C('card')
+
+    def _fg(self):
+        return C('on_primary') if self.style == 'primary' else C('text')
+
+    def _paint(self):
+        self._c.rgba = self._col(self.state == 'down')
+
+    def set_text(self, t):
+        self.text_ = t
+        self.lbl.raw = t
+
+    def _upd(self, *a):
+        self._r.pos = self.pos
+        self._r.size = self.size
+        self.lbl.size = self.size
+        self.lbl.pos = self.pos
+
+    def on_press(self):
+        self.on_key(self)
+
+
+class VKeyboard(BoxLayout):
+    def __init__(self, **kw):
+        super().__init__(orientation='vertical', size_hint=(None, None),
+                         padding=[dp(4), dp(6), dp(4), dp(8)], spacing=dp(6), **kw)
+        self.height = dp(46) * 4 + dp(6) * 3 + dp(14)
+        self.target = None
+        self.page = 'en'
+        self.shift = False
+        import strings
+        self.last_letters = 'ar' if getattr(strings, 'LANG', 'ar') == 'ar' else 'en'
+        self.page = self.last_letters
+        with self.canvas.before:
+            self._bgc = Color(*self._panel())
+            self._bg = Rectangle(pos=self.pos, size=self.size)
+            self._lc = Color(*C('border'))
+            self._ln = Rectangle(pos=self.pos, size=(self.width, dp(1)))
+        self.bind(pos=self._upd, size=self._upd)
+        self._repeat = None
+        self._build()
+        Window.bind(width=self._fit, on_touch_up=self._outside_tap)
+        self._fit()
+
+    # -- layout --------------------------------------------------------------
+    def _upd(self, *a):
+        self._bg.pos, self._bg.size = self.pos, self.size
+        self._ln.pos = (self.x, self.top)
+        self._ln.size = (self.width, dp(1))
+
+    def _fit(self, *a):
+        self.width = Window.width
+        self.pos = (0, 0)
+
+    @staticmethod
+    def _panel():
+        return C('topbar') if THEME.is_dark else C('bg')
+
+    def _rows(self):
+        if self.page == 'en':
+            return _KB_EN
+        if self.page == 'ar':
+            return _KB_AR
+        return _KB_AR_SYM if self.last_letters == 'ar' else _KB_SYM
+
+    def _build(self):
+        from strings import tr
+        self._bgc.rgba = self._panel()
+        self._lc.rgba = C('border')
+        self.clear_widgets()
+        for row in self._rows():
+            line = BoxLayout(orientation='horizontal', spacing=dp(5))
+            if row is _KB_EN[1]:
+                line.add_widget(Widget(size_hint_x=0.5))
+            for k in row:
+                line.add_widget(self._key(k))
+            if row is _KB_EN[1]:
+                line.add_widget(Widget(size_hint_x=0.5))
+            self.add_widget(line)
+        bottom = BoxLayout(orientation='horizontal', spacing=dp(5))
+        letters = self.page != 'sym'
+        sw = _Key('MODE', '123' if letters else ('ع' if self.last_letters == 'ar' else 'ABC'),
+                  self._press, style='fn', size_hint_x=1.4)
+        lang = _Key('LANG', 'EN' if self.last_letters == 'ar' else 'ع', self._press,
+                    style='fn', size_hint_x=1.1)
+        comma = _Key('CH', '،' if self.last_letters == 'ar' else ',', self._press, size_hint_x=0.9)
+        space = _Key('CH', ' ', self._press, size_hint_x=4.2)
+        dot = _Key('CH', '.', self._press, size_hint_x=0.9)
+        done = _Key('DONE', tr('kb_done'), self._press, style='primary', size_hint_x=1.7)
+        for k in (sw, lang, comma, space, dot, done):
+            bottom.add_widget(k)
+        self.add_widget(bottom)
+
+    def _key(self, k):
+        if k == 'BACK':
+            return _Key('BACK', '⌫', self._press, style='fn', size_hint_x=1.5)
+        if k == 'SHIFT':
+            return _Key('SHIFT', '⇧', self._press, style='fn', size_hint_x=1.5)
+        t = k.upper() if (self.shift and self.page == 'en') else k
+        return _Key('CH', t, self._press)
+
+    # -- behaviour ---------------------------------------------------------
+    def _press(self, key):
+        t = self.target
+        kind = key.kind
+        if kind == 'CH':
+            if t is not None:
+                t.insert_text(key.text_)
+            if self.shift:
+                self.shift = False
+                self._build()
+        elif kind == 'BACK':
+            if t is not None:
+                t.do_backspace()
+            self._start_repeat()
+        elif kind == 'SHIFT':
+            self.shift = not self.shift
+            self._build()
+        elif kind == 'LANG':
+            self.last_letters = 'ar' if self.last_letters == 'en' else 'en'
+            self.page = self.last_letters
+            self.shift = False
+            self._build()
+        elif kind == 'MODE':
+            self.page = 'sym' if self.page != 'sym' else self.last_letters
+            self._build()
+        elif kind == 'DONE':
+            tt = self.target
+            self.hide()
+            if tt is not None and tt.text.strip():
+                tt.dispatch('on_text_validate')
+
+    def _start_repeat(self):
+        self._stop_repeat()
+        self._repeat = Clock.schedule_once(self._repeat_start, 0.45)
+
+    def _repeat_start(self, dt):
+        self._repeat = Clock.schedule_interval(self._repeat_tick, 0.06)
+
+    def _repeat_tick(self, dt):
+        if self.target is None or not any(
+                k.state == 'down' for k in self.walk(restrict=True) if isinstance(k, _Key)
+                and k.kind == 'BACK'):
+            self._stop_repeat()
+            return False
+        self.target.do_backspace()
+
+    def _stop_repeat(self):
+        if self._repeat is not None:
+            self._repeat.cancel()
+            self._repeat = None
 
     def on_touch_down(self, touch):
-        if self.disabled or not self.collide_point(*touch.pos):
-            return False
-        touch.grab(self)
-        self.dragging = True
-        self.value = self._frac(touch.x)
-        if self.on_start:
-            self.on_start(self.value)
-        self._draw()
-        return True
-
-    def on_touch_move(self, touch):
-        if touch.grab_current is self:
-            self.value = self._frac(touch.x)
-            if self.on_move:
-                self.on_move(self.value)
+        if self.collide_point(*touch.pos):
+            _VK_STATE['uid'] = touch.uid
+            super().on_touch_down(touch)
             return True
         return False
 
     def on_touch_up(self, touch):
-        if touch.grab_current is self:
-            touch.ungrab(self)
-            self.dragging = False
-            self.value = self._frac(touch.x)
-            self._draw()
-            if self.on_end:
-                self.on_end(self.value)
+        if self.collide_point(*touch.pos):
+            self._stop_repeat()
+            super().on_touch_up(touch)
             return True
+        return super().on_touch_up(touch)
+
+    def on_touch_move(self, touch):
+        if self.collide_point(*touch.pos):
+            return super().on_touch_move(touch) or True
         return False
 
+    def _outside_tap(self, win, touch):
+        """A tap that is neither on the keyboard nor on a text field closes it."""
+        if self.parent is None or touch.uid == _VK_STATE['uid']:
+            return False
+        if abs(touch.x - touch.ox) > dp(14) or abs(touch.y - touch.oy) > dp(14):
+            return False                                    # a scroll, not a tap
+        self.hide()
+        return False
 
-# ---------------------------------------------------------------------------
-# text field that shows correctly shaped Arabic
-# ---------------------------------------------------------------------------
-class FieldInput(FloatLayout):
-    """A TextInput (invisible, only used to get keyboard input) plus our own
-    renderer, because Kivy's TextInput cannot shape / reorder Arabic."""
+    # -- show / hide ---------------------------------------------------------
+    def show(self, target):
+        self.target = target
+        lang = getattr(target, 'vk_lang', None)
+        if lang in ('en', 'ar'):
+            self.last_letters = lang
+            self.page = lang
+        elif self.page == 'sym':
+            pass
+        self.shift = False
+        self.theme_refresh()
+        self._build()
+        Clock.unschedule(self._watch)
+        Clock.schedule_interval(self._watch, 0.4)
+        if self.parent is None:
+            Window.add_widget(self)
+        else:                                               # keep it above new dialogs
+            Window.remove_widget(self)
+            Window.add_widget(self)
 
-    def __init__(self, text='', hint='', on_submit=None, max_len=80, **kw):
-        kw.setdefault('size_hint', (1, None))
-        kw.setdefault('height', dp(52))
-        super(FieldInput, self).__init__(**kw)
-        self.hint = hint
-        self.on_submit = on_submit
-        self.max_len = max_len
+    def theme_refresh(self):
+        self._bgc.rgba = self._panel()
+
+    def _watch(self, dt):
+        """Close the keyboard when its field disappeared (dialog closed, screen left)."""
+        t = self.target
+        if t is None or t.get_root_window() is None or not t.focus:
+            self.hide()
+            return False
+
+    def hide(self):
+        t = self.target
+        self.target = None
+        self._stop_repeat()
+        Clock.unschedule(self._watch)
+        if self.parent is not None:
+            Window.remove_widget(self)
+        if t is not None and t.focus:
+            t.focus = False
+
+    def release(self, widget):
+        """Called when a field lost focus: close unless another field took over."""
+        if self.target is widget and not widget.focus:
+            self.hide()
+
+
+def _get_vk():
+    if _VK_STATE['widget'] is None:
+        _VK_STATE['widget'] = VKeyboard()
+    return _VK_STATE['widget']
+
+
+def vk_show(target):
+    _get_vk().show(target)
+
+
+def vk_fallback(target):
+    """Phone keyboard did not appear: show the in-app one (mode 'auto' only)."""
+    if VK['mode'] != 'auto' or not isinstance(target, ATextInput) or not target.focus:
+        return False
+    target.keyboard_mode = 'managed'
+    vk_show(target)
+    return True
+
+
+def vk_release(widget):
+    if _VK_STATE['widget'] is not None:
+        _VK_STATE['widget'].release(widget)
+
+
+def vk_hide():
+    """Close the keyboard if it is open (True when it was)."""
+    vk = _VK_STATE['widget']
+    if vk is not None and vk.parent is not None:
+        vk.hide()
+        return True
+    return False
+
+
+class ATextInput(TextInput):
+    """Rounded single-line text input that shows Arabic correctly *while typing*.
+
+    Kivy's own text rendering cannot join Arabic letters, so the real TextInput
+    text is made invisible and the same text is painted on top of it after
+    ``rtl.display`` (shaping + bidi).  The caret is drawn by this widget too and
+    taps are mapped back to the logical cursor position.
+    """
+
+    def __init__(self, hint='', **kw):
+        kw.setdefault('multiline', False)
+        kw.setdefault('background_normal', '')
+        kw.setdefault('background_active', '')
+        kw.setdefault('background_color', (0, 0, 0, 0))
+        kw.setdefault('font_size', sp(17))
+        kw.setdefault('padding', [dp(14), dp(13), dp(14), dp(13)])
+        kw.setdefault('write_tab', False)
+        kw.setdefault('size_hint_y', None)
+        kw.setdefault('height', dp(50))
+        kw.setdefault('use_handles', False)
+        self._fg = kw.pop('foreground_color', None) or C('text')
+        self._hint_col = kw.pop('hint_text_color', None) or alpha(C('sub'), 0.85)
+        self._caret_col = kw.pop('cursor_color', None) or C('primary')
+        self._hint_raw = hint or ''
+        self.vk_lang = kw.pop('vk_lang', None)     # 'en' / 'ar' page the keyboard opens on
+        clear = (0, 0, 0, 0)
+        kw['foreground_color'] = clear          # real text is invisible
+        kw['hint_text_color'] = clear
+        kw['cursor_color'] = clear
+        kw['selection_color'] = clear
+        kw['hint_text'] = ''
+        self._scroll = 0.0
         self._caret_on = True
+        self._widths = {}
+        super().__init__(**kw)
         with self.canvas.before:
-            Color(*SURFACE2)
-            self._bg = RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(14)])
-        self.ti = TextInput(text=text, multiline=False, write_tab=False,
-                            background_normal='', background_active='', background_color=(0, 0, 0, 0),
-                            foreground_color=(0, 0, 0, 0), cursor_color=(0, 0, 0, 0),
-                            selection_color=(0, 0, 0, 0), hint_text='', size_hint=(1, 1))
-        for attr, val in (('use_bubble', False), ('use_handles', False), ('keyboard_suggestions', False)):
+            self._c = Color(*C('input'))
+            self._r = RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(12)])
+            self._cb = Color(*C('border'))
+            self._lb = Line(rounded_rectangle=(self.x, self.y, self.width, self.height, dp(12)),
+                            width=1.1)
+            # whatever the TextInput draws next (its own invisible text) inherits
+            # this colour state, so make it fully transparent
+            Color(1, 1, 1, 0)
+        with self.canvas.after:
+            self._tcol = Color(1, 1, 1, 1)
+            self._trect = Rectangle(size=(0, 0))
+            self._ccol = Color(*self._caret_col)
+            self._crect = Rectangle(size=(0, 0))
+        self._blink = Clock.schedule_interval(self._toggle_caret, 0.53)
+        self._trig = Clock.create_trigger(self._redraw, -1)
+        self.bind(pos=self._upd, size=self._upd, focus=self._on_focus,
+                  text=self._trig, cursor=self._trig, font_size=self._trig,
+                  font_name=self._trig, halign=self._trig, padding=self._trig)
+        self._upd()
+
+    # -- public ------------------------------------------------------------
+    @property
+    def hint_raw(self):
+        return self._hint_raw
+
+    @hint_raw.setter
+    def hint_raw(self, v):
+        self._hint_raw = v or ''
+        self._trig()
+
+    # -- frame --------------------------------------------------------------
+    def _upd(self, *a):
+        self._r.pos = self.pos
+        self._r.size = self.size
+        self._cb.rgba = C('primary') if self.focus else C('border')
+        self._lb.rounded_rectangle = (self.x, self.y, self.width, self.height, dp(12))
+        self._lb.width = 1.6 if self.focus else 1.1
+        self._trig()
+
+    def _apply_kb_mode(self):
+        # with the in-app keyboard Kivy must not ask Android for its own keyboard
+        self.keyboard_mode = 'managed' if VK['mode'] == 'inapp' else 'auto'
+
+    def focus_input(self):
+        """Give the field focus (and show the keyboard) from code."""
+        self._apply_kb_mode()
+        self.focus = True
+
+    def _on_focus(self, *a):
+        self._caret_on = True
+        self._upd()
+        if VK['mode'] == 'inapp':
+            if self.focus:
+                vk_show(self)
+            else:
+                Clock.schedule_once(lambda dt: vk_release(self), 0.06)
+        if self.focus:
+            Clock.schedule_once(self._scroll_into_view, 0.15)
+
+    def _scroll_into_view(self, dt):
+        """Keep the focused field visible inside a surrounding ScrollView."""
+        w = self.parent
+        while w is not None and not isinstance(w, ScrollView):
+            w = w.parent
+        if w is not None and w.children and w.children[0].height > w.height + 1:
             try:
-                setattr(self.ti, attr, val)
-            except Exception:
+                w.scroll_to(self, padding=dp(24), animate=False)
+            except Exception:                                   # noqa: BLE001
                 pass
-        self.on_resize = None                         # called when the field grows (long text wraps)
-        self.shown = Txt(ltext=text or hint, color=TEXT if text else SUB, font_size=sp(17),
-                         align_mode='auto', nlines=4, size_hint=(None, None))
-        self.add_widget(self.shown)
-        self.add_widget(self.ti)
-        self.ti.bind(text=self._on_text, on_text_validate=self._validate, focus=self._on_focus)
-        self.bind(pos=self._layout, size=self._layout)
-        self._blink = Clock.schedule_interval(self._blink_tick, 0.5)
-        self._layout()
-        self._draw_caret()
+
+    def _toggle_caret(self, dt):
+        if not self.get_root_window():
+            return
+        self._caret_on = not self._caret_on
+        self._ccol.a = 1.0 if (self.focus and self._caret_on) else 0.0
+
+    # -- text geometry ---------------------------------------------------------
+    def _base_rtl(self, text):
+        if text:
+            return rtl.base_is_rtl(text)
+        if self._hint_raw:
+            return rtl.base_is_rtl(self._hint_raw)
+        return rtl.UI_RTL
+
+    def _width(self, s, base):
+        key = (s, base, self.font_size, self.font_name)
+        w = self._widths.get(key)
+        if w is None:
+            w = measure_text(rtl.display(s, base) if s else '', self.font_name, self.font_size)
+            if len(self._widths) > 600:
+                self._widths.clear()
+            self._widths[key] = w
+        return w
+
+    def _caret_offset(self, text, index, base, full_w):
+        """x of the caret measured from the left edge of the painted text."""
+        pre = text[:index]
+        w = self._width(pre, base)
+        if base:
+            return max(0.0, full_w - w)
+        return w
+
+    def _redraw(self, *a):
+        text = self.text or ''
+        showing_hint = not text
+        raw = self._hint_raw if showing_hint else text
+        base = self._base_rtl(text)
+        pl, pt, pr, pb = self.padding
+        avail = max(1.0, self.width - pl - pr)
+        # painted texture
+        tex = None
+        if raw:
+            cl = CoreLabel(text=rtl.display(raw, base), font_name=self.font_name,
+                           font_size=self.font_size, color=(1, 1, 1, 1))
+            cl.refresh()
+            tex = cl.texture
+        tw = float(tex.width) if tex else 0.0
+        th = float(tex.height) if tex else self.font_size * 1.3
+        halign = self.halign
+        if halign == 'auto':
+            halign = 'right' if base else 'left'
+        # caret position inside the text image
+        if showing_hint:
+            cx_img = tw if base else 0.0
+        else:
+            cx_img = self._caret_offset(text, self.cursor_index(), base, tw)
+        # horizontal scrolling when the text is wider than the field
+        if tw <= avail:
+            self._scroll = 0.0
+            if halign == 'right':
+                x_img = self.x + pl + (avail - tw)
+            elif halign == 'center':
+                x_img = self.x + pl + (avail - tw) / 2.0
+            else:
+                x_img = self.x + pl
+            vis_tex = tex
+            vis_w = tw
+        else:
+            margin = dp(6)
+            if cx_img - self._scroll < margin:
+                self._scroll = max(0.0, cx_img - margin)
+            elif cx_img - self._scroll > avail - margin:
+                self._scroll = cx_img - (avail - margin)
+            self._scroll = min(max(0.0, self._scroll), tw - avail)
+            x_img = self.x + pl
+            vis_w = avail
+            vis_tex = tex.get_region(self._scroll, 0, avail, th) if tex else None
+        y_img = self.y + (self.height - th) / 2.0
+        if vis_tex is not None:
+            self._tcol.rgba = self._hint_col if showing_hint else self._fg
+            self._trect.texture = vis_tex
+            self._trect.pos = (x_img, y_img)
+            self._trect.size = (vis_w, th)
+        else:
+            self._trect.size = (0, 0)
+        # caret
+        if showing_hint:
+            if halign == 'right':
+                cx = self.x + pl + avail
+            elif halign == 'center':
+                cx = self.center_x
+            else:
+                cx = self.x + pl
+        else:
+            cx = x_img + cx_img - (self._scroll if tw > avail else 0.0)
+        ch = min(self.height - dp(14), self.font_size * 1.45)
+        self._crect.pos = (cx - dp(1), self.y + (self.height - ch) / 2.0)
+        self._crect.size = (dp(2), ch)
+        self._ccol.rgba = self._caret_col if self.focus else (0, 0, 0, 0)
+        self._caret_on = True
+
+    # -- touch: map the tap to a logical cursor position ----------------------
+    def on_touch_down(self, touch):
+        hit = self.collide_point(*touch.pos)
+        if hit:
+            self._apply_kb_mode()
+            _VK_STATE['uid'] = touch.uid
+        res = super().on_touch_down(touch)
+        if hit and self.text:
+            Clock.schedule_once(lambda dt, x=touch.x: self._place_cursor(x), 0)
+        return res
+
+    def _place_cursor(self, touch_x):
+        text = self.text
+        if not text:
+            return
+        base = self._base_rtl(text)
+        pl = self.padding[0] if self.padding else 0
+        tex_w = float(self._trect.size[0]) if self._trect.size[0] else 0.0
+        full_w = self._width(text, base)
+        x_img = self._trect.pos[0] if tex_w else self.x + pl
+        rel = touch_x - x_img + (self._scroll if full_w > self.width - 2 * pl else 0.0)
+        best, best_d = len(text), None
+        for i in range(len(text) + 1):
+            d = abs(self._caret_offset(text, i, base, full_w) - rel)
+            if best_d is None or d < best_d:
+                best, best_d = i, d
+        self.cursor = self.get_cursor_from_index(best)
+
+
+class FormField(BoxLayout):
+    """Caption + input."""
+
+    def __init__(self, caption, hint='', text='', multiline=False, height=None, vk_lang=None, **kw):
+        kw.setdefault('size_hint_y', None)
+        super().__init__(orientation='vertical', spacing=dp(6), **kw)
+        self.bind(minimum_height=self.setter('height'))
+        self.caption = label(caption, size=13, color='sub', bold=True)
+        self.input = ATextInput(hint=hint, text=text, multiline=False)
+        self.input.vk_lang = vk_lang
+        if height:
+            self.input.height = height
+        self.add_widget(self.caption)
+        self.add_widget(self.input)
 
     @property
     def text(self):
-        return self.ti.text
+        return self.input.text.strip()
 
-    def focus(self):
-        self.ti.focus = True
 
-    def release(self):
+_WIN_REF = {'h': 0}
+
+
+class Dialog(ModalView):
+    """Modal card with a title, a body widget and a row of buttons.
+
+    buttons = [(text, callback, style), ...]; the dialog closes after each
+    button unless the callback returns False.
+
+    A dialog that contains text fields is pinned to the top part of the screen
+    (at most about half of its height) so the on-screen keyboard, which Android
+    draws on top of the app, can never hide a field or the buttons; the body
+    scrolls when it is taller.  If the system does shrink the window for the
+    keyboard, the card simply follows the window height.
+    """
+
+    def __init__(self, title='', body=None, buttons=(), message='', body_max=None,
+                 dismissable=True, **kw):
+        extra = {}
+        if hasattr(ModalView, 'overlay_color'):
+            extra['overlay_color'] = (0, 0, 0, 0.62)
+        else:                                   # old Kivy: dim through the background
+            extra['background_color'] = (0, 0, 0, 0.62)
+        kw.update(extra)
+        kw.setdefault('background_color', (0, 0, 0, 0))
+        super().__init__(size_hint=(None, None), background='',
+                         auto_dismiss=dismissable, **kw)
+        self.width = min(Window.width * 0.92, dp(420))
+        self._body_max = body_max
+        self._fixed = []                        # card children that are not the scroll view
+        self._sv = None
+        self._body = body
+        card = Card(padding=[dp(18), dp(16), dp(18), dp(16)], spacing=dp(12),
+                    size_hint_y=None, radius=dp(24), pos_hint={'x': 0, 'y': 0})
+        card.bind(minimum_height=card.setter('height'))
+        if title:
+            t = label(title, size=19, bold=True)
+            card.add_widget(t)
+            self._fixed.append(t)
+        if message:
+            m = label(message, size=15, color='sub')
+            card.add_widget(m)
+            self._fixed.append(m)
+        if body is not None:
+            sv = ScrollView(size_hint_y=None, do_scroll_x=False, bar_width=dp(3),
+                            bar_color=alpha(C('sub'), 0.4),
+                            bar_inactive_color=alpha(C('sub'), 0.0))
+            body.size_hint_y = None
+            sv.add_widget(body)
+            body.bind(height=self._fit)
+            card.add_widget(sv)
+            self._sv = sv
+        if buttons:
+            row = hbox(dp(48), spacing=dp(10))
+            btns = []
+            for text, cb, style in buttons:
+                b = button(text, None, style=style, height=dp(48))
+                b.size_hint_x = 1
+                b.bind(on_release=lambda inst, cb=cb: self._pressed(cb))
+                btns.append(b)
+            add_row(row, btns)
+            card.add_widget(row)
+            self._fixed.append(row)
+        self.add_widget(card)
+        self._card = card
+        card.bind(height=self._fit)
+        for w in self._fixed:
+            w.bind(height=self._fit)
+        Window.bind(size=self._fit)
+        self.bind(on_dismiss=self._unbind_window)
+        self._fit()
+
+    def open(self, *a, **kw):
+        super().open(*a, **kw)
+        self._fit()
+
+    def _unbind_window(self, *a):
+        Window.unbind(size=self._fit)
+
+    def _has_input(self):
+        if self._body is None:
+            return False
+        return any(isinstance(w, ATextInput) for w in self._body.walk(restrict=True))
+
+    def _top_mode(self):
+        """True when the card must sit in the upper part of the screen so the
+        on-screen keyboard (which Android draws over the app) never covers a field.
+        If the system already shrinks the window for the keyboard, centre normally."""
+        if not self._has_input():
+            return False
+        return Window.height >= 0.85 * _WIN_REF['h']
+
+    def _align_center(self, *a):
+        if not self._is_open:
+            return
+        if self._top_mode():
+            self.center_x = self._window.width / 2.0
+            self.top = self._window.height - dp(26)
+        else:
+            self.center = self._window.center
+
+    def _fit(self, *a):
+        _WIN_REF['h'] = max(_WIN_REF['h'], Window.height)
+        avail = Window.height * 0.95
+        if self._top_mode():
+            avail = min(avail, max(dp(300), Window.height * 0.52))
+        if self._sv is not None:
+            pad = self._card.padding
+            pad_v = pad[1] + pad[3]
+            n = len(self._card.children)
+            fixed = sum(w.height for w in self._fixed) + pad_v + \
+                self._card.spacing * max(0, n - 1)
+            room = max(dp(90), avail - fixed)
+            cap = self._body_max if self._body_max else room
+            self._sv.height = max(dp(40), min(self._body.height, room, cap))
+            self._sv.bar_width = dp(3) if self._body.height > self._sv.height + 1 else 0
+        self.height = min(self._card.height, avail)
+        self._align_center()
+
+    def _pressed(self, cb):
+        res = cb() if cb else None
+        if res is not False:
+            self.dismiss()
+
+
+def confirm(title, message, on_yes, yes_text='OK', no_text='Cancel', danger=False):
+    d = Dialog(title=title, message=message, buttons=[
+        (no_text, None, 'soft'),
+        (yes_text, on_yes, 'danger' if danger else 'primary')])
+    d.open()
+    return d
+
+
+class Toast(BoxLayout):
+    """Short message at the bottom of the screen."""
+
+    _current = None
+
+    @classmethod
+    def show(cls, text, kind='info', duration=2.2):
+        if cls._current is not None:
+            try:
+                Window.remove_widget(cls._current)
+            except Exception:
+                pass
+        col = {'info': C('card2'), 'ok': C('success'), 'error': C('danger'),
+               'warn': C('warn')}.get(kind, C('card2'))
+        fg = C('text') if kind == 'info' else (1, 1, 1, 1)
+        t = cls(col, fg, text)
+        cls._current = t
+        Window.add_widget(t)
+        t.opacity = 0
+        anim = Animation(opacity=1, d=0.15) + Animation(opacity=1, d=duration) + \
+            Animation(opacity=0, d=0.3)
+        anim.bind(on_complete=lambda *_: cls._remove(t))
+        anim.start(t)
+
+    @classmethod
+    def _remove(cls, t):
         try:
-            self._blink.cancel()
+            Window.remove_widget(t)
         except Exception:
             pass
-        self.ti.focus = False
+        if cls._current is t:
+            cls._current = None
 
-    def _on_focus(self, inst, val):
-        self._draw_caret()
-
-    def _validate(self, *a):
-        if self.on_submit:
-            self.on_submit(self.ti.text)
-
-    def _on_text(self, inst, value):
-        if len(value) > self.max_len:
-            inst.text = value[:self.max_len]
-            return
-        self.shown.ltext = value or self.hint
-        self.shown.color = TEXT if value else SUB
+    def __init__(self, bg, fg, text, **kw):
+        super().__init__(orientation='vertical', size_hint=(None, None),
+                         padding=[dp(16), dp(10)], **kw)
+        w = min(Window.width * 0.9, dp(380))
+        self.width = w
+        self.lbl = ALabel(raw=text, font_size=sp(15), color=fg, wrap=True, autoheight=True,
+                          size_hint_y=None, align='center')
+        self.add_widget(self.lbl)
+        self.lbl.bind(height=self._fit)
         self._fit()
-        self._draw_caret()
+        self.x = (Window.width - w) / 2.0
+        self.y = dp(84)
+        with self.canvas.before:
+            Color(*C('shadow'))
+            self._sh = RoundedRectangle(pos=(self.x, self.y - dp(2)), size=self.size,
+                                        radius=[dp(16)])
+            Color(*bg)
+            self._bg = RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(16)])
+        self.bind(pos=self._upd, size=self._upd)
 
-    LINE_H = sp(17) * 1.3
+    def _fit(self, *a):
+        self.height = self.lbl.height + dp(20)
 
-    def _fit(self):
-        """A long text wraps onto up to 4 lines and the field grows, so what is typed is always seen."""
-        n = 1
-        if self.ti.text and self.shown.width > 2:
-            n = max(1, len(self.shown.logical_lines()))
-        h = max(dp(52), n * self.LINE_H + dp(22))
-        if abs(h - self.height) > 0.5:
-            self.height = h
-            if self.on_resize:
-                self.on_resize()
+    def _upd(self, *a):
+        self._bg.pos = self.pos
+        self._bg.size = self.size
+        self._sh.pos = (self.x, self.y - dp(2))
+        self._sh.size = self.size
+
+    def on_touch_down(self, touch):
+        return False
+
+
+# ======================================================================
+# Top bar & navigation drawer
+# ======================================================================
+class TopBar(BoxLayout):
+    """Title bar: menu / back button on the leading side, actions on the other."""
+
+    def __init__(self, on_menu, on_back, **kw):
+        super().__init__(orientation='horizontal', size_hint_y=None, height=dp(58),
+                         padding=[dp(8), dp(4)], spacing=dp(4), **kw)
+        with self.canvas.before:
+            Color(*C('topbar'))
+            self._bg = Rectangle(pos=self.pos, size=self.size)
+            Color(*C('border'))
+            self._ln = Rectangle(pos=self.pos, size=(self.width, 1))
+        self.bind(pos=self._upd, size=self._upd)
+        self._on_menu = on_menu
+        self._on_back = on_back
+        self.lead = IconButton(name='menu', color=C('text'), size_hint=(None, 1), width=dp(46))
+        self.lead.bind(on_release=lambda *_: self._lead_pressed())
+        self.title = ALabel(raw='', font_size=sp(20), bold=True, color=C('text'),
+                            align='auto')
+        self.subtitle = ALabel(raw='', font_size=sp(12), color=C('sub'), align='auto',
+                               size_hint_y=None, height=dp(18))
+        self.title_box = BoxLayout(orientation='vertical', spacing=0)
+        self.logo = None
+        self.actions = BoxLayout(orientation='horizontal', size_hint=(None, 1), width=0,
+                                 spacing=dp(2))
+        self.mode = 'menu'
+        self._rebuild()
+
+    def _upd(self, *a):
+        self._bg.pos = self.pos
+        self._bg.size = self.size
+        self._ln.pos = self.pos
+        self._ln.size = (self.width, 1)
+
+    def _rebuild(self):
+        self.clear_widgets()
+        self.title_box.clear_widgets()
+        self.title_box.add_widget(self.title)
+        if self.subtitle.raw:
+            self.title_box.add_widget(self.subtitle)
+        items = [self.lead]
+        if self.logo is not None:
+            items.append(self.logo)
+        items += [self.title_box, self.actions]
+        add_row(self, items)
+
+    def _lead_pressed(self):
+        if self.mode == 'back':
+            self._on_back()
+        else:
+            self._on_menu()
+
+    def set(self, title, mode='menu', actions=(), sub='', logo=False):
+        self.title.raw = title
+        self.subtitle.raw = sub or ''
+        self.title.font_size = sp(22 if logo else 20)
+        self.height = dp(70) if (sub or logo) else dp(58)
+        if logo:
+            self.logo = centered(logo_image(dp(46)), (dp(46), dp(46)))
+        else:
+            self.logo = None
+        self._rebuild()
+        self.mode = mode
+        self.lead.name = 'back' if mode == 'back' else 'menu'
+        self.lead.mirror = (mode == 'back' and rtl.UI_RTL)
+        self.actions.clear_widgets()
+        for icon, cb in actions:
+            b = IconButton(name=icon, color=C('text'), size_hint=(None, 1), width=dp(46))
+            b.bind(on_release=lambda inst, cb=cb: cb())
+            self.actions.add_widget(b)
+        self.actions.width = dp(46) * len(actions)
+
+
+class DrawerItem(ButtonBehavior, BoxLayout):
+    """One entry of the navigation drawer: icon + text."""
+
+    def __init__(self, icon, text, active=False, **kw):
+        super().__init__(orientation='horizontal', size_hint_y=None, height=dp(52),
+                         padding=[dp(14), 0], spacing=dp(14), **kw)
+        self.active = active
+        with self.canvas.before:
+            self._c = Color(*(alpha(C('primary'), 0.16) if active else (0, 0, 0, 0)))
+            self._r = RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(14)])
+        self.bind(pos=self._upd, size=self._upd, state=self._state)
+        col = C('primary') if active else C('text')
+        holder = BoxLayout(orientation='vertical', size_hint=(None, 1), width=dp(28))
+        holder.add_widget(Widget())
+        holder.add_widget(Icon(name=icon, color=col, size_hint=(None, None),
+                               size=(dp(26), dp(26))))
+        holder.add_widget(Widget())
+        add_row(self, [holder, ALabel(raw=text, font_size=sp(17), color=col, bold=active)])
+
+    def _upd(self, *a):
+        self._r.pos = self.pos
+        self._r.size = self.size
+
+    def _state(self, *a):
+        if self.state == 'down':
+            self._c.rgba = alpha(C('primary'), 0.25)
+        else:
+            self._c.rgba = alpha(C('primary'), 0.16) if self.active else (0, 0, 0, 0)
+
+
+class NavDrawer(FloatLayout):
+    """Sliding side menu. Opens from the right in Arabic, from the left in English."""
+
+    progress = NumericProperty(0.0)
+    is_open = BooleanProperty(False)
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.panel = BoxLayout(orientation='vertical', size_hint=(None, 1),
+                               padding=[dp(14), dp(18), dp(14), dp(14)], spacing=dp(6))
+        self.panel.width = min(Window.width * 0.82, dp(310))
+        with self.panel.canvas.before:
+            self._pc = Color(*C('card'))
+            self._pr = Rectangle(pos=self.panel.pos, size=self.panel.size)
+            self._pb = Color(*C('border'))
+            self._pl = Rectangle(pos=self.panel.pos, size=(1, self.panel.height))
+        self.panel.bind(pos=self._upd_panel, size=self._upd_panel)
+        with self.canvas.before:
+            self._sc = Color(0, 0, 0, 0)
+            self._sr = Rectangle(pos=self.pos, size=self.size)
+        self.add_widget(self.panel)
+        self.bind(pos=self._layout, size=self._layout, progress=self._layout)
+        Window.bind(size=self._on_window)
+        self._layout()
+
+    def _on_window(self, *a):
+        self.panel.width = min(Window.width * 0.82, dp(310))
+        self._layout()
+
+    def _upd_panel(self, *a):
+        self._pr.pos = self.panel.pos
+        self._pr.size = self.panel.size
+        edge_x = self.panel.x if rtl.UI_RTL else self.panel.right - 1
+        self._pl.pos = (edge_x, self.panel.y)
+        self._pl.size = (1, self.panel.height)
 
     def _layout(self, *a):
-        self._bg.pos = self.pos
-        self._bg.size = self.size
-        pad = dp(16)
-        self.shown.pos = (self.x + pad, self.y)
-        self.shown.size = (self.width - 2 * pad, self.height)
-        self.ti.pos = self.pos
-        self.ti.size = self.size
-        self._fit()
-        self._draw_caret()
-
-    def _blink_tick(self, dt):
-        self._caret_on = not self._caret_on
-        self._draw_caret()
-
-    def _draw_caret(self):
-        self.canvas.after.clear()
-        if not self.ti.focus:
-            return
-        with self.canvas.after:                       # accent outline while typing
-            Color(ACCENT[0], ACCENT[1], ACCENT[2], 0.85)
-            Line(rounded_rectangle=(self.x + dp(0.8), self.y + dp(0.8), self.width - dp(1.6),
-                                    self.height - dp(1.6), dp(14)), width=dp(1.3))
-        if not self._caret_on:
-            return
-        txt = self.ti.text
-        pad = dp(16)
-        lines = self.shown.logical_lines() if txt else ['']
-        last = lines[-1] if lines else ''
-        w = measure(textfix.fix(last), font_for(last), self.shown.font_size, False) if last else 0
-        rtl = textfix.is_rtl(txt) if txt else True
-        if rtl:
-            x = (self.x + self.width) - pad - w - dp(2)
+        w = self.panel.width
+        p = self.progress
+        if rtl.UI_RTL:
+            self.panel.x = self.right - w * p
         else:
-            x = self.x + pad + w + dp(1)
-        # the text block is centred vertically; the caret sits on its last line
-        cy = self.y + self.height / 2.0 - (len(lines) - 1) * self.LINE_H / 2.0
-        with self.canvas.after:
-            Color(*ACCENT)
-            Rectangle(pos=(x, cy - dp(11)), size=(dp(2), dp(22)))
+            self.panel.x = self.x - w + w * p
+        self.panel.y = self.y
+        self._sr.pos = self.pos
+        self._sr.size = self.size
+        self._sc.rgba = (0, 0, 0, 0.55 * p)
+        self._upd_panel()
 
+    # -- control ----------------------------------------------------------
+    def open(self):
+        self.is_open = True
+        Animation.cancel_all(self, 'progress')
+        Animation(progress=1.0, d=0.22, t='out_cubic').start(self)
 
-# ---------------------------------------------------------------------------
-# virtualised list with selection + drag reordering
-# ---------------------------------------------------------------------------
-class Row(Widget):
-    """Base class for list rows. Subclasses implement fill() and relayout().
+    def close(self):
+        self.is_open = False
+        Animation.cancel_all(self, 'progress')
+        Animation(progress=0.0, d=0.18, t='out_cubic').start(self)
 
-    A row is laid out at y = 0 (inside its Carrier); the list moves it with a Translate, so a
-    row never has to re-layout its children just because it moved."""
-    kind = 'row'
+    def toggle(self):
+        self.close() if self.is_open else self.open()
 
-    def __init__(self, **kw):
-        kw.setdefault('size_hint', (None, None))
-        super(Row, self).__init__(**kw)
-        self.idx = -1
-        self.item = None
-        self.ctx = None
-        self._quiet = False
-        self._sig = None
-        self.bind(pos=self._on_geom, size=self._on_geom)
-
-    def _on_geom(self, *a):
-        if not self._quiet:
-            self.relayout()
-
-    def place(self, x, y, w, h):
-        """Set position and size with one layout at most (the caller lays the row out when this
-        returns True)."""
-        if (self.x, self.y, self.width, self.height) == (x, y, w, h):
-            return False
-        self._quiet = True
-        try:
-            self.size = (w, h)
-            self.pos = (x, y)
-        finally:
-            self._quiet = False
-        return True
-
-    def unchanged(self, *parts):
-        """True when everything the layout depends on equals what the previous layout used - the
-        drawing would come out the same, so the caller can skip it."""
-        sig = (self.x, self.y, self.width, self.height) + parts
-        if sig == self._sig:
-            return True
-        self._sig = sig
-        return False
-
-    def bind_item(self, item, idx, ctx):
-        self.item, self.idx, self.ctx = item, idx, ctx
-        self.fill(item, idx, ctx)
-        self.relayout()
-
-    def fill(self, item, idx, ctx):
-        pass
-
-    def relayout(self):
-        pass
-
-    def hit_handle(self, x):
-        return False
-
-
-class Carrier(Widget):
-    """Holds one row.  Its Translate puts the row at its place in the list, so moving a row
-    (scrolling, drag and drop) is a single property write."""
-
-    def __init__(self, row, **kw):
-        kw.setdefault('size_hint', (None, None))
-        kw.setdefault('size', (0, 0))
-        super(Carrier, self).__init__(**kw)
-        with self.canvas.before:
-            PushMatrix()
-            self._tr = Translate(0, 0)
-        with self.canvas.after:
-            PopMatrix()
-        self.row = row
-        row._car = self
-        self.add_widget(row)
-        self.vy = 0.0              # where the row belongs: the target of the drag animation
-
-    def at(self):
-        return self._tr.y
-
-    def put(self, y):
-        if self._tr.y != y:
-            self._tr.y = y
-
-
-class VList(StencilView):
-    """Fixed-row-height virtualised list.
-
-    Scrolling moves ONE Translate (``_shift``) that carries every row; each row sits in a Carrier
-    whose own Translate holds its place in the list.  Nothing inside a row is laid out again while
-    the list scrolls, which is what keeps it smooth.  All translations are whole pixels so text
-    stays sharp.
-
-    owner callbacks (all optional)
-        on_tap(idx, item, x)         short tap
-        on_long(idx, item)           long press (selection starts here)
-        on_reorder(src, dst)         drag finished
-        can_drag(idx, item) -> bool
-    """
-
-    def __init__(self, row_factories, row_h=None, **kw):
-        super(VList, self).__init__(**kw)
-        self.factories = row_factories
-        self.row_h = float(max(1, int(round(row_h or dp(96)))))      # whole pixels
-        self.bottom_pad = 0.0            # free space after the last row (under a floating button)
-        self.items = []
-        self.ctx = None
-        self.scroll = 0.0
-        self.rows = {}
-        self.pools = {}
-        self.on_tap = None
-        self.on_long = None
-        self.on_reorder = None
-        self.can_drag = None
-        self.reorderable = False
-        self.prefetch = None             # optional: prefetch(first, last) for the rows just outside the screen
-        self._pf_rng = None
-        self._t = None
-        self._fling = None
-        self._fling_v = 0.0
-        self._long_ev = None
-        self._drag = None          # dict while dragging
-        self._drag_ev = None
-        self._geo = None
-        self._holder = Widget(size_hint=(None, None), size=(0, 0))
-        with self._holder.canvas.before:
-            PushMatrix()
-            self._shift = Translate(0, 0)
-        with self._holder.canvas.after:
-            PopMatrix()
-        self.add_widget(self._holder)
-        self.bind(pos=self.relayout, size=self.relayout)
-
-    # ---- data ----------------------------------------------------------
-    def set_items(self, items, keep_scroll=True):
-        self.items = list(items)
-        if not keep_scroll:
-            self.scroll = 0.0
-        self._release_all()
-        self.relayout()
-
-    def refresh(self):
-        for i, row in self.rows.items():
-            if 0 <= i < len(self.items):
-                row.bind_item(self.items[i], i, self.ctx)
-        self.relayout()
-
-    def _recycle(self, i):
-        row = self.rows.pop(i)
-        self._holder.remove_widget(row._car)
-        self.pools.setdefault(row.kind, []).append(row)
-
-    def _release_all(self):
-        for i in list(self.rows):
-            self._recycle(i)
-
-    def max_scroll(self):
-        return max(0.0, len(self.items) * self.row_h + self.bottom_pad - self.height)
-
-    def scroll_to(self, idx):
-        self.scroll = max(0.0, min(self.max_scroll(), idx * self.row_h))
-        self.relayout()
-
-    def screen_y(self, i):
-        """Bottom edge of row ``i`` in window coordinates (None when it is not on screen)."""
-        row = self.rows.get(i)
-        if row is None:
-            return None
-        return row._car.at() + self._shift.y
-
-    # ---- layout ----------------------------------------------------------
-    def _slot_of(self, i):
-        d = self._drag
-        if not d or i == d['from']:
-            return i
-        f, t = d['from'], d['to']
-        if f < t and f < i <= t:
-            return i - 1
-        if f > t and t <= i < f:
-            return i + 1
-        return i
-
-    def _acquire(self, i, vy):
-        item = self.items[i]
-        kind = item.get('kind', 'row') if isinstance(item, dict) else 'row'
-        pool = self.pools.setdefault(kind, [])
-        if pool:
-            row = pool.pop()
-        else:
-            row = self.factories[kind]()
-            Carrier(row)
-        row.kind = kind
-        row.place(self.x, 0.0, self.width, self.row_h)
-        car = row._car
-        car.vy = vy
-        car.put(vy)
-        row.bind_item(item, i, self.ctx)          # one layout, at the final geometry
-        self._holder.add_widget(car)
-        self.rows[i] = row
-        return row
-
-    def relayout(self, *a):
-        if self.height <= 1:
-            return
-        n = len(self.items)
-        rh = self.row_h
-        self.scroll = max(0.0, min(self.scroll, self.max_scroll()))
-        shift = float(round(self.scroll))
-        base = float(round(self.y + self.height))
-        geo = (self.x, self.width, rh, base)
-        moved = geo != self._geo
-        self._geo = geo
-        first = max(0, int(self.scroll // rh) - 1)
-        last = min(n - 1, int((self.scroll + self.height) // rh) + 1)
-        wanted = set(range(first, last + 1))
-        d = self._drag
-        pf = self.prefetch
-        if pf is not None and not d and (first, last) != self._pf_rng:
-            self._pf_rng = (first, last)
-            try:
-                pf(max(0, first - 8), min(n - 1, last + 8))
-            except Exception:
-                self.prefetch = None
-        if d:
-            wanted.add(d['from'])
-        for i in list(self.rows):
-            if i not in wanted:
-                self._recycle(i)
-        if self._shift.y != shift:
-            self._shift.y = shift
-        for i in wanted:
-            vy = base - (self._slot_of(i) + 1) * rh
-            row = self.rows.get(i)
-            if row is None:
-                self._acquire(i, vy)
-                continue
-            car = row._car
-            car.vy = vy
-            if moved and row.place(self.x, 0.0, self.width, rh):
-                row.relayout()
-            if d and i == d['from']:
-                car.put(round(d['y']) - shift)
-            elif d:
-                # smooth movement is handled by _drag_tick; only far jumps are instant
-                if abs(car.at() - vy) > rh * 3:
-                    car.put(vy)
-            else:
-                car.put(vy)
-
-    # ---- touch -------------------------------------------------------------
-    def index_at(self, y):
-        i = int((self.scroll + ((self.y + self.height) - y)) // self.row_h)
-        return i if 0 <= i < len(self.items) else None
-
+    # -- touch handling ---------------------------------------------------
     def on_touch_down(self, touch):
-        if not self.collide_point(*touch.pos):
-            return False
-        btn = getattr(touch, 'button', None)
-        if btn in ('scrollup', 'scrolldown'):
-            self.scroll += (-1 if btn == 'scrollup' else 1) * self.row_h * 1.2
-            self.relayout()
+        if self.is_open or self.progress > 0.02:
+            if self.panel.collide_point(*touch.pos):
+                return super().on_touch_down(touch)
+            self.close()
             return True
-        if self._t is not None:          # stale state from a lost touch
-            self._cancel_long()
-            if self._drag:
-                self._end_drag()
-            self._t = None
-        self._stop_fling()
-        touch.grab(self)
-        idx = self.index_at(touch.y)
-        state = 'pending'
-        if idx is not None and self.reorderable and self.ctx is not None and getattr(self.ctx, 'sel_mode', False):
-            row = self.rows.get(idx)
-            if row is not None and row.hit_handle(touch.x) and self._can_drag(idx):
-                state = 'handle'
-        self._t = {'uid': touch.uid, 'idx': idx, 'state': state, 'sx': touch.x, 'sy': touch.y,
-                   'last_y': touch.y, 'samples': [(time.time(), touch.y)]}
-        if idx is not None and state == 'pending':
-            self._long_ev = Clock.schedule_once(self._long_fire, 0.42)
-        return True
-
-    def _can_drag(self, idx):
-        if not self.reorderable:
-            return False
-        if self.can_drag:
-            return bool(self.can_drag(idx, self.items[idx]))
-        return True
-
-    def _long_fire(self, dt):
-        self._long_ev = None
-        t = self._t
-        if not t or t['state'] != 'pending' or t['idx'] is None:
-            return
-        t['state'] = 'armed'
-        if self.on_long:
-            self.on_long(t['idx'], self.items[t['idx']])
-
-    def on_touch_move(self, touch):
-        t = self._t
-        if touch.grab_current is not self or not t or t['uid'] != touch.uid:
-            return False
-        thr = dp(9)
-        moved = abs(touch.y - t['sy']) > thr or abs(touch.x - t['sx']) > thr
-        st = t['state']
-        if st == 'pending':
-            if moved:
-                self._cancel_long()
-                t['state'] = 'scroll'
-                st = 'scroll'
-        elif st == 'armed':
-            if moved and t['idx'] is not None and self._can_drag(t['idx']) and \
-                    getattr(self.ctx, 'sel_mode', False):
-                self._begin_drag(t['idx'], touch)
-                st = 'drag'
-                t['state'] = 'drag'
-        elif st == 'handle':
-            if moved:
-                self._begin_drag(t['idx'], touch)
-                st = 'drag'
-                t['state'] = 'drag'
-        if st == 'scroll':
-            dy = touch.y - t['last_y']
-            self.scroll += dy
-            self.relayout()
-            t['samples'].append((time.time(), touch.y))
-            if len(t['samples']) > 6:
-                t['samples'].pop(0)
-        elif st == 'drag':
-            self._drag_move(touch.y)
-        t['last_y'] = touch.y
-        return True
-
-    def on_touch_up(self, touch):
-        t = self._t
-        if touch.grab_current is not self or not t or t['uid'] != touch.uid:
-            return False
-        touch.ungrab(self)
-        self._cancel_long()
-        st = t['state']
-        self._t = None
-        if st in ('pending', 'handle'):
-            if t['idx'] is not None and self.on_tap:
-                self.on_tap(t['idx'], self.items[t['idx']], touch.x)
-        elif st == 'scroll':
-            s = t['samples']
-            if len(s) >= 2:
-                dt = s[-1][0] - s[0][0]
-                if dt > 0.001:
-                    v = (s[-1][1] - s[0][1]) / dt
-                    if abs(v) > dp(120):
-                        self._start_fling(v)
-        elif st == 'drag':
-            self._end_drag()
-        return True
-
-    def _cancel_long(self):
-        if self._long_ev:
-            self._long_ev.cancel()
-            self._long_ev = None
-
-    # ---- kinetic scrolling ------------------------------------------------------
-    def _start_fling(self, v):
-        self._fling_v = max(-dp(6000), min(dp(6000), v))
-        if self._fling is None:
-            self._fling = Clock.schedule_interval(self._fling_tick, 0)      # every frame
-
-    def _stop_fling(self):
-        if self._fling is not None:
-            self._fling.cancel()
-            self._fling = None
-        self._fling_v = 0.0
-
-    def _fling_tick(self, dt):
-        dt = min(dt, 0.05)              # a long frame must not make the list jump
-        self.scroll += self._fling_v * dt
-        self._fling_v *= 0.94 ** (dt * 60.0)
-        before = self.scroll
-        self.relayout()
-        if abs(self._fling_v) < dp(25) or self.scroll != before:
-            self._stop_fling()
-
-    # ---- drag reorder -------------------------------------------------------------
-    def _begin_drag(self, idx, touch):
-        row = self.rows.get(idx)
-        if row is None:
-            return
-        car = row._car
-        y = car.at() + self._shift.y
-        self._drag = {'from': idx, 'to': idx, 'y': y, 'touch_y': touch.y, 'off': touch.y - y}
-        self._holder.remove_widget(car)          # re-add so it is drawn above the others
-        self._holder.add_widget(car)
-        row.opacity = 0.95
-        if self._drag_ev is None:
-            self._drag_ev = Clock.schedule_interval(self._drag_tick, 0)
-
-    def _drag_move(self, y):
-        d = self._drag
-        if not d:
-            return
-        d['touch_y'] = y
-        self._update_drag_target()
-
-    def _update_drag_target(self):
-        d = self._drag
-        rh = self.row_h
-        y = d['touch_y']
-        d['y'] = max(self.y - rh * 0.5, min((self.y + self.height) - rh * 0.5, y - d['off']))
-        center = d['y'] + rh / 2.0
-        to = int((self.scroll + ((self.y + self.height) - center)) // rh)
-        d['to'] = max(0, min(len(self.items) - 1, to))
-
-    def _drag_tick(self, dt):
-        d = self._drag
-        if not d:
-            return
-        dt = min(dt, 0.05)
-        # auto scroll near the edges
-        edge = dp(70)
-        ty = d['touch_y']
-        top = self.y + self.height
-        speed = dp(9) * dt * 60.0
-        if ty > top - edge:
-            self.scroll -= speed * (1 + (ty - (top - edge)) / edge)
-        elif ty < self.y + edge:
-            self.scroll += speed * (1 + ((self.y + edge) - ty) / edge)
-        self.scroll = max(0.0, min(self.scroll, self.max_scroll()))
-        self._update_drag_target()
-        self.relayout()
-        k = min(1.0, dt * 18.0)
-        shift = self._shift.y
-        for i, row in self.rows.items():
-            car = row._car
-            if i == d['from']:
-                car.put(round(d['y']) - shift)
-                continue
-            diff = car.vy - car.at()
-            if abs(diff) <= 1.0:
-                car.put(car.vy)
-            else:
-                step = diff * k
-                if abs(step) < 1.0:
-                    step = 1.0 if diff > 0 else -1.0
-                car.put(round(car.at() + step))
-
-    def _end_drag(self):
-        d = self._drag
-        if self._drag_ev is not None:
-            self._drag_ev.cancel()
-            self._drag_ev = None
-        self._drag = None
-        for row in self.rows.values():
-            row.opacity = 1.0
-        src, dst = d['from'], d['to']
-        if src != dst and self.on_reorder:
-            self.on_reorder(src, dst)
-        else:
-            self._release_all()
-            self.relayout()
-
-
-# ---------------------------------------------------------------------------
-# overlays: sheet / dialogs / toast
-# ---------------------------------------------------------------------------
-def make_scroll(**kw):
-    """The scrolling container used by sheets and the settings (see PlainScroll)."""
-    return PlainScroll(**kw)
-
-
-class PlainScroll(StencilView):
-    """Vertical scroller that owns its touches, exactly like VList does.
-
-    Kivy's ScrollView hands a touch to the rows as a *press* in several situations (the finger
-    rested a moment, an earlier touch was lost, ...), after which the list can no longer scroll.
-    Here no row ever sees a touch: the container tracks the finger itself.  Moving more than a few
-    dp scrolls (with a fling on release); lifting the finger without moving is a tap, which is
-    delivered to the Tap widget under the finger.  The content (``box``) keeps its normal layout
-    position; scrolling only moves one Translate.
-    """
-
-    THRESH = dp(9)
-
-    def __init__(self, **kw):
-        kw.setdefault('size_hint', (1, 1))
-        super(PlainScroll, self).__init__(**kw)
-        self.box = None
-        self.offset = 0.0
-        self._t = None
-        self._fling = None
-        self._fling_v = 0.0
-        self._hl_ev = None
-        self._long_ev = None
-        self._bar_ev = None
-        self._holder = Widget(size_hint=(None, None), size=(0, 0))
-        with self._holder.canvas.before:
-            PushMatrix()
-            self._shift = Translate(0, 0)
-        with self._holder.canvas.after:
-            PopMatrix()
-        super(PlainScroll, self).add_widget(self._holder)
-        self._bar = Widget(size_hint=(None, None), size=(0, 0))
-        with self._bar.canvas:
-            self._bar_col = Color(1, 1, 1, 0)
-            self._bar_rect = RoundedRectangle(pos=(0, 0), size=(0, 0), radius=[dp(2)])
-        super(PlainScroll, self).add_widget(self._bar)
-        self.bind(pos=self._sync, size=self._sync)
-
-    # ---- content ---------------------------------------------------------------
-    def add_widget(self, widget, *a, **k):
-        if self.box is not None:
-            self._holder.remove_widget(self.box)
-            self.box.unbind(height=self._sync)
-        self.box = widget
-        widget.size_hint_x = None
-        self._holder.add_widget(widget)
-        widget.bind(height=self._sync)
-        self._sync()
-
-    def max_offset(self):
-        b = self.box
-        return max(0.0, (b.height if b is not None else 0.0) - self.height)
-
-    def _get_scroll_y(self):
-        m = self.max_offset()
-        return 1.0 if m <= 0 else 1.0 - self.offset / m
-
-    def _set_scroll_y(self, v):
-        self.offset = (1.0 - max(0.0, min(1.0, v))) * self.max_offset()
-        self._apply()
-
-    scroll_y = property(_get_scroll_y, _set_scroll_y)
-
-    def _sync(self, *a):
-        b = self.box
-        if b is None:
-            return
-        if b.width != self.width:
-            b.width = self.width
-        b.pos = (self.x, self.top - b.height)
-        self._apply()
-
-    def _apply(self):
-        self.offset = max(0.0, min(self.max_offset(), self.offset))
-        y = float(round(self.offset))
-        if self._shift.y != y:
-            self._shift.y = y
-        self._draw_bar()
-
-    def scroll_to_top(self):
-        self.offset = 0.0
-        self._apply()
-
-    # ---- scroll bar ----------------------------------------------------------------
-    def _draw_bar(self):
-        m = self.max_offset()
-        if m <= 0 or self._bar_ev is None:
-            self._bar_col.a = 0
-            return
-        h = self.height
-        total = self.box.height
-        bh = max(dp(28), h * h / total)
-        by = self.top - bh - (h - bh) * (self.offset / m)
-        self._bar_rect.pos = (self.right - dp(5), by)
-        self._bar_rect.size = (dp(3), bh)
-        self._bar_col.a = 0.32
-
-    def _show_bar(self):
-        if self._bar_ev is not None:
-            self._bar_ev.cancel()
-        self._bar_ev = Clock.schedule_once(self._hide_bar, 0.8)
-        self._draw_bar()
-
-    def _hide_bar(self, dt):
-        self._bar_ev = None
-        self._bar_col.a = 0
-
-    # ---- touch -----------------------------------------------------------------------
-    def _find(self, w, x, y):
-        """Deepest Tap widget under (x, y) in the content's own coordinates."""
-        for c in w.children:                    # topmost first
-            if c.disabled or c.opacity == 0 or not c.collide_point(x, y):
-                continue
-            r = self._find(c, x, y)
-            if r is not None:
-                return r
-        if isinstance(w, Tap) and not w.disabled and (w.callback or w.long_callback) and w.collide_point(x, y):
-            return w
-        return None
-
-    def _clear_target(self):
-        for ev in (self._hl_ev, self._long_ev):
-            if ev is not None:
-                ev.cancel()
-        self._hl_ev = None
-        self._long_ev = None
-        t = self._t
-        if t and t.get('tgt') is not None and t['tgt'].pressed:
-            t['tgt']._set_pressed(False)
-
-    def _highlight(self, dt):
-        self._hl_ev = None
-        t = self._t
-        if t and t['state'] == 'pending' and t['tgt'] is not None:
-            t['tgt']._set_pressed(True)
-
-    def _long_fire(self, dt):
-        self._long_ev = None
-        t = self._t
-        if t and t['state'] == 'pending' and t['tgt'] is not None and t['tgt'].long_callback:
-            t['state'] = 'done'
-            tgt = t['tgt']
-            tgt._set_pressed(False)
-            tgt.long_callback(tgt)
-
-    def on_touch_down(self, touch):
-        if not self.collide_point(*touch.pos):
-            return False
-        btn = getattr(touch, 'button', None)
-        if btn in ('scrollup', 'scrolldown'):
-            self.offset += (-1 if btn == 'scrollup' else 1) * dp(90)
-            self._apply()
-            return True
-        if self._t is not None:                 # stale state from a lost touch
-            self._clear_target()
-            self._t = None
-        was_moving = self._fling is not None
-        self._stop_fling()
-        touch.grab(self)
-        tgt = None
-        if not was_moving and self.box is not None:         # a touch that stops a fling is not a tap
-            tgt = self._find(self.box, touch.x, touch.y - self._shift.y)
-        self._t = {'uid': touch.uid, 'state': 'pending' if not was_moving else 'stopper',
-                   'sx': touch.x, 'sy': touch.y, 'last_y': touch.y, 'tgt': tgt,
-                   'samples': [(time.time(), touch.y)]}
-        if tgt is not None:
-            self._hl_ev = Clock.schedule_once(self._highlight, 0.08)
-            if tgt.long_callback:
-                self._long_ev = Clock.schedule_once(self._long_fire, 0.45)
-        return True
-
-    def on_touch_move(self, touch):
-        t = self._t
-        if touch.grab_current is not self or not t or t['uid'] != touch.uid:
-            return False
-        if t['state'] in ('pending', 'stopper'):
-            if abs(touch.y - t['sy']) > self.THRESH or abs(touch.x - t['sx']) > self.THRESH:
-                self._clear_target()
-                t['state'] = 'scroll'
-        if t['state'] == 'scroll':
-            self.offset += touch.y - t['last_y']
-            self._apply()
-            self._show_bar()
-            t['samples'].append((time.time(), touch.y))
-            if len(t['samples']) > 6:
-                t['samples'].pop(0)
-        t['last_y'] = touch.y
-        return True
-
-    def on_touch_up(self, touch):
-        t = self._t
-        if touch.grab_current is not self or not t or t['uid'] != touch.uid:
-            return False
-        touch.ungrab(self)
-        self._t = None
-        st = t['state']
-        tgt = t['tgt']
-        for ev in (self._hl_ev, self._long_ev):
-            if ev is not None:
-                ev.cancel()
-        self._hl_ev = None
-        self._long_ev = None
-        if st == 'pending':
-            if tgt is not None:
-                tgt._set_pressed(False)
-                tgt.tap_now()
-        elif st == 'scroll':
-            s = t['samples']
-            if len(s) >= 2:
-                dt = s[-1][0] - s[0][0]
-                if dt > 0.001:
-                    v = (s[-1][1] - s[0][1]) / dt
-                    if abs(v) > dp(120):
-                        self._start_fling(v)
-        elif tgt is not None and tgt.pressed:
-            tgt._set_pressed(False)
-        return True
-
-    # ---- fling -------------------------------------------------------------------------
-    def _start_fling(self, v):
-        self._fling_v = max(-dp(6000), min(dp(6000), v))
-        if self._fling is None:
-            self._fling = Clock.schedule_interval(self._fling_tick, 0)
-
-    def _stop_fling(self):
-        if self._fling is not None:
-            self._fling.cancel()
-            self._fling = None
-        self._fling_v = 0.0
-
-    def _fling_tick(self, dt):
-        dt = min(dt, 0.05)
-        want = self.offset + self._fling_v * dt
-        self._fling_v *= 0.94 ** (dt * 60.0)
-        self.offset = want
-        self._apply()
-        self._show_bar()
-        if abs(self._fling_v) < dp(25) or self.offset != want:
-            self._stop_fling()
-
-
-class Overlay(FloatLayout):
-    cancelable = True
-
-    def __init__(self, root, **kw):
-        kw.setdefault('size_hint', (1, 1))
-        super(Overlay, self).__init__(**kw)
-        self.root = root
-        self.panel = None
-        with self.canvas.before:
-            Color(0, 0, 0, 0.62)
-            self._dim = Rectangle(pos=self.pos, size=self.size)
-        self.bind(pos=self._geo, size=self._geo)
-
-    def _geo(self, *a):
-        self._dim.pos = self.pos
-        self._dim.size = self.size
-        self.place()
-
-    def place(self):
-        pass
-
-    def show(self):
-        self.root.show_overlay(self)
-
-    def dismiss(self):
-        self.root.dismiss_overlay(self)
-
-    def on_back(self):
-        if self.cancelable:
-            self.dismiss()
-        return True
-
-    def on_touch_down(self, touch):
-        if FloatLayout.on_touch_down(self, touch):
-            return True
-        if self.panel is not None and self.panel.collide_point(*touch.pos):
-            return True
-        # A press outside the panel only closes the overlay.  The rest of that touch, and any press
-        # right after it, is swallowed by the root so it can never press what lies under the finger.
-        if self.cancelable:
-            guard = getattr(self.root, 'guard_touches', None)
-            if guard:
-                guard(touch)
-            self.dismiss()
-        return True
-
-    def on_touch_move(self, touch):
-        FloatLayout.on_touch_move(self, touch)
-        return True
-
-    def on_touch_up(self, touch):
-        FloatLayout.on_touch_up(self, touch)
-        return True
-
-
-class Panel(FloatLayout):
-    """Rounded background container used by sheets and dialogs."""
-
-    def __init__(self, radius=None, **kw):
-        kw.setdefault('size_hint', (None, None))
-        super(Panel, self).__init__(**kw)
-        self.radius = radius or [dp(24)] * 4
-        with self.canvas.before:
-            Color(*SURFACE)
-            self._bg = RoundedRectangle(pos=self.pos, size=self.size, radius=self.radius)
-        self.bind(pos=self._geo, size=self._geo)
-
-    def _geo(self, *a):
-        self._bg.pos = self.pos
-        self._bg.size = self.size
-
-
-def icon_chip(canvas, cx, cy, d=None, danger=False):
-    """The soft round tile behind a row icon."""
-    d = d or dp(38)
-    with canvas:
-        if danger:
-            Color(DANGER[0], DANGER[1], DANGER[2], 0.14)
-        else:
-            Color(1, 1, 1, 0.07)
-        Ellipse(pos=(cx - d / 2.0, cy - d / 2.0), size=(d, d))
-
-
-class SheetRow(Tap):
-    def __init__(self, label, icon=None, value=None, checked=False, danger=False, callback=None, **kw):
-        kw.setdefault('height', dp(58))
-        super(SheetRow, self).__init__(callback=callback, **kw)
-        self.danger = danger
-        col = DANGER if danger else (ACCENT if checked else TEXT)
-        self.icon = Icon(name=icon, color=list(DANGER if danger else TEXT), size=(dp(22), dp(22))) if icon else None
-        self.lbl = Txt(ltext=label, color=col, bold=bool(checked), font_size=sp(16), size_hint=(None, None))
-        self.val = Txt(ltext=value or '', color=SUB, font_size=sp(14), halign='left', size_hint=(None, None))
-        self.chk = Icon(name='check', color=list(ACCENT), size=(dp(24), dp(24)), stroke=2.0) if checked else None
-        for w in (self.icon, self.lbl, self.val, self.chk):
-            if w is not None:
-                self.add_widget(w)
-        self.bind(pos=self._lay, size=self._lay)
-        self._lay()
-
-    def set_checked(self, flag):
-        """Tick / untick in place (no rebuild of the whole sheet: that is what made long lists lag)."""
-        flag = bool(flag)
-        if flag == (self.chk is not None):
-            return
-        if flag:
-            self.chk = Icon(name='check', color=list(ACCENT), size=(dp(24), dp(24)), stroke=2.0)
-            self.add_widget(self.chk)
-        else:
-            self.remove_widget(self.chk)
-            self.chk = None
-        self.lbl.color = DANGER if self.danger else (ACCENT if flag else TEXT)
-        self.lbl.bold = flag
-        self._lay()
-
-    def _lay(self, *a):
-        pad = dp(18)
-        cy = self.y + self.height / 2.0
-        right = (self.x + self.width) - pad
-        self.canvas.before.clear()
-        if self.icon is not None:
-            self.icon.center = (right - dp(19), cy)
-            icon_chip(self.canvas.before, right - dp(19), cy, dp(38), self.danger)
-            right -= dp(52)
-        left = self.x + pad
-        if self.chk is not None:
-            self.chk.center = (left + dp(12), cy)
-            left += dp(40)
-        vw = min(dp(150), self.val.text_width() + dp(10)) if self.val.ltext else 0
-        self.val.pos = (left, self.y)
-        self.val.size = (vw, self.height)
-        self.lbl.pos = (left + vw + dp(6), self.y)
-        self.lbl.size = (max(10, right - left - vw - dp(6)), self.height)
-
-
-class SettingRow(Tap):
-    """One line of the settings card: tinted icon tile, title (+ small description) and, on the far
-    side, either a switch or the current value with a chevron."""
-    TILE = dp(38)
-    PAD = dp(16)
-
-    def __init__(self, title, sub='', icon=None, value=None, switch=None, callback=None, **kw):
-        kw.setdefault('height', dp(66) if sub else dp(58))
-        super(SettingRow, self).__init__(callback=callback, **kw)
-        self.icon = Icon(name=icon, color=list(ACCENT), size=(dp(20), dp(20)), stroke=1.7) if icon else None
-        self.lbl = Txt(ltext=title, font_size=sp(15.5), size_hint=(None, None))
-        self.sub = Txt(ltext=sub, color=SUB, font_size=sp(12.5), size_hint=(None, None)) if sub else None
-        self.sw = switch
-        self.val = Txt(ltext=value, color=ACCENT, bold=True, font_size=sp(14), halign='left',
-                       size_hint=(None, None)) if value is not None else None
-        self.chev = Icon(name='chev_left', color=[0.5, 0.52, 0.58, 1], size=(dp(18), dp(18)),
-                         stroke=1.8) if (value is not None) else None
-        for w in (self.icon, self.lbl, self.sub, self.sw, self.val, self.chev):
-            if w is not None:
-                self.add_widget(w)
-        self.bind(pos=self._lay, size=self._lay)
-        self._lay()
-
-    def _lay(self, *a):
-        pad = self.PAD
-        cy = self.y + self.height / 2.0
-        right = (self.x + self.width) - pad
-        self.canvas.before.clear()
-        if self.icon is not None:
-            d = self.TILE
-            with self.canvas.before:
-                Color(ACCENT[0], ACCENT[1], ACCENT[2], 0.13)
-                RoundedRectangle(pos=(right - d, cy - d / 2.0), size=(d, d), radius=[dp(11)])
-            self.icon.center = (right - d / 2.0, cy)
-            right -= d + dp(13)
-        left = self.x + pad
-        if self.sw is not None:
-            self.sw.pos = (left, cy - self.sw.height / 2.0)
-            left += self.sw.width + dp(14)
-        elif self.val is not None:
-            self.chev.center = (left + dp(7), cy)
-            left += dp(22)
-            vw = min(dp(120), self.val.text_width() + dp(8))
-            self.val.pos = (left, self.y)
-            self.val.size = (vw, self.height)
-            left += vw + dp(10)
-        w = max(10, right - left)
-        if self.sub is not None:
-            self.lbl.pos = (left, cy + dp(1))
-            self.lbl.size = (w, dp(24))
-            self.sub.pos = (left, cy - dp(23))
-            self.sub.size = (w, dp(22))
-        else:
-            self.lbl.pos = (left, self.y)
-            self.lbl.size = (w, self.height)
-
-    def set_value(self, text):
-        if self.val is not None:
-            self.val.ltext = text
-            self._lay()
-
-
-class SheetButton(Widget):
-    """A wide rounded button inside a sheet (accent when enabled, quiet when not)."""
-
-    def __init__(self, label, callback=None, enabled=True, **kw):
-        kw.setdefault('size_hint', (1, None))
-        kw.setdefault('height', dp(74))
-        super(SheetButton, self).__init__(**kw)
-        self.enabled = bool(enabled)
-        self.btn = Tap(callback=(callback if enabled else None), size_hint=(None, None), height=dp(52))
-        self.btn.fb_radius = [dp(16)] * 4
-        self.lbl = Txt(ltext=label, halign='center', bold=True, font_size=sp(16.5),
-                       color=ON_ACCENT if enabled else SUB, size_hint=(None, None))
-        self.btn.add_widget(self.lbl)
-        self.add_widget(self.btn)
-        self.bind(pos=self._lay, size=self._lay)
-        self._lay()
-
-    def _lay(self, *a):
-        b = self.btn
-        b.pos = (self.x + dp(18), self.y + dp(11))
-        b.size = (max(10, self.width - dp(36)), dp(52))
-        self.lbl.pos = b.pos
-        self.lbl.size = b.size
-        b.canvas.before.clear()
-        with b.canvas.before:
-            Color(*(ACCENT if self.enabled else SURFACE2))
-            RoundedRectangle(pos=b.pos, size=b.size, radius=[dp(16)])
-
-
-class SheetTitle(Widget):
-    def __init__(self, text, **kw):
-        kw.setdefault('size_hint', (1, None))
-        kw.setdefault('height', dp(60))
-        super(SheetTitle, self).__init__(**kw)
-        self.lbl = Txt(ltext=text, bold=True, font_size=sp(20), size_hint=(None, None))
-        self.add_widget(self.lbl)
-        self.bind(pos=self._lay, size=self._lay)
-        self._lay()
-
-    def _lay(self, *a):
-        self.lbl.pos = (self.x + dp(20), self.y + dp(2))
-        self.lbl.size = (self.width - dp(40), self.height - dp(4))
-        self.canvas.before.clear()
-        with self.canvas.before:
-            Color(*DIVIDER)
-            Rectangle(pos=(self.x + dp(20), self.y), size=(max(0, self.width - dp(40)), 1))
-
-
-class SheetLabel(Widget):
-    """Small section heading (accent) - or, with muted=True, a quiet explanatory line."""
-
-    def __init__(self, text, muted=False, **kw):
-        kw.setdefault('size_hint', (1, None))
-        kw.setdefault('height', dp(40) if not muted else dp(36))
-        super(SheetLabel, self).__init__(**kw)
-        self.lbl = Txt(ltext=text, color=SUB if muted else ACCENT, bold=not muted,
-                       font_size=sp(13) if not muted else sp(13), nlines=2 if muted else 1,
-                       valign='bottom' if not muted else 'middle', size_hint=(None, None))
-        self.add_widget(self.lbl)
-        self.bind(pos=self._lay, size=self._lay)
-        self._lay()
-
-    def _lay(self, *a):
-        self.lbl.pos = (self.x + dp(20), self.y + (dp(4) if self.lbl.valign == 'bottom' else 0))
-        self.lbl.size = (self.width - dp(40), self.height - dp(4))
-
-
-class ChipsRow(Widget):
-    """Wrapping grid of chips (used for the speed picker)."""
-
-    def __init__(self, options, current, on_pick, cols=4, **kw):
-        kw.setdefault('size_hint', (1, None))
-        super(ChipsRow, self).__init__(**kw)
-        self.cols = cols
-        n = len(options)
-        self.nrows = (n + cols - 1) // cols
-        self.height = self.nrows * dp(52) + dp(10)
-        self.chips = []
-        for val, label in options:
-            c = Chip(label, selected=(abs(float(val) - float(current)) < 1e-6),
-                     callback=(lambda w, v=val: on_pick(v)), size_hint=(None, None))
-            self.chips.append(c)
-            self.add_widget(c)
-        self.bind(pos=self._lay, size=self._lay)
-        self._lay()
-
-    def _lay(self, *a):
-        pad = dp(18)
-        gap = dp(8)
-        cw = (self.width - 2 * pad - gap * (self.cols - 1)) / float(self.cols)
-        for i, c in enumerate(self.chips):
-            r, col = divmod(i, self.cols)
-            # RTL: first chip on the right
-            x = (self.x + self.width) - pad - (col + 1) * cw - col * gap
-            y = (self.y + self.height) - dp(4) - (r + 1) * dp(44) - r * dp(8)
-            c.pos = (x, y)
-            c.size = (cw, dp(44))
-
-
-class MenuSheet(Overlay):
-    """Bottom sheet (portrait) or side panel (landscape) with a scrolling list.
-
-    build() is a function returning a list of widgets; call rebuild() to refresh."""
-
-    PAD_TOP = dp(18)
-    PAD_BOTTOM = dp(14)
-
-    def __init__(self, root, build, footer=None, **kw):
-        super(MenuSheet, self).__init__(root, **kw)
-        self.build = build
-        self.footer_fn = footer           # optional: returns a widget pinned to the bottom (never scrolls)
-        self.footer_w = None
-        self.footer_h = 0
-        self.panel = Panel()
-        self.add_widget(self.panel)
-        self.sv = make_scroll(size_hint=(None, None))
-        self.box = BoxLayout(orientation='vertical', size_hint_y=None,
-                             padding=[0, self.PAD_TOP, 0, self.PAD_BOTTOM])
-        self.box.bind(minimum_height=self.box.setter('height'))
-        self.sv.add_widget(self.box)
-        self.panel.add_widget(self.sv)
-        self.content_h = self.PAD_TOP + self.PAD_BOTTOM
-        self.rebuild()
-
-    def rebuild(self):
-        self.box.clear_widgets()
-        widgets = self.build()
-        total = self.PAD_TOP + self.PAD_BOTTOM
-        for w in widgets:
-            w.size_hint = (1, None)
-            total += w.height
-            self.box.add_widget(w)
-        self.content_h = total
-        self._make_footer()
-        self.box.height = total                 # at once: do not wait for the next layout pass
-        if total <= self.sv.height:
-            self.sv.scroll_y = 1                # content that fits is never left scrolled
-        self._ready = True
-        self.place()
-
-    def _make_footer(self):
-        if self.footer_w is not None:
-            self.panel.remove_widget(self.footer_w)
-            self.footer_w = None
-        self.footer_h = 0
-        if self.footer_fn is not None:
-            fw = self.footer_fn()
-            fw.size_hint = (None, None)
-            self.panel.add_widget(fw)
-            self.footer_w = fw
-            self.footer_h = fw.height + dp(6)
-
-    def refresh_footer(self):
-        """Replace only the pinned button (cheap): used after ticking a row."""
-        self._make_footer()
-        self.place()
-
-    def place(self):
-        W, H = self.width, self.height
-        if W <= 1 or H <= 1 or not getattr(self, '_ready', False):
-            return
-        self.panel.canvas.after.clear()
-        if W > H:
-            pw = min(dp(420), W * 0.55)
-            ph = H
-            self.panel.radius = [dp(24), 0, 0, dp(24)]
-            self.panel.pos = ((self.x + self.width) - pw, self.y)
-        else:
-            pw = min(W, dp(520))
-            ph = min(self.content_h + self.footer_h + dp(6), H * 0.82)
-            self.panel.radius = [dp(26), dp(26), 0, 0]
-            self.panel.pos = ((self.x + self.width / 2.0) - pw / 2.0, self.y)
-        self.panel._bg.radius = self.panel.radius
-        self.panel.size = (pw, ph)
-        fh = self.footer_h
-        self.sv.pos = (self.panel.x, self.panel.y + fh)
-        self.sv.size = (pw, ph - fh)
-        if self.footer_w is not None:
-            self.footer_w.pos = self.panel.pos
-            self.footer_w.size = (pw, fh)
-            with self.panel.canvas.after:               # a thin line above the pinned button
-                Color(1, 1, 1, 0.08)
-                Rectangle(pos=(self.panel.x, self.panel.y + fh), size=(pw, 1))
-        if W <= H:
-            with self.panel.canvas.after:               # the little grab handle of a bottom sheet
-                Color(1, 1, 1, 0.22)
-                RoundedRectangle(pos=(self.panel.x + pw / 2.0 - dp(20), (self.panel.y + ph) - dp(12)),
-                                 size=(dp(40), dp(4)), radius=[dp(2)])
-
-
-class Dialog(Overlay):
-    def __init__(self, root, title, message='', buttons=None, **kw):
-        super(Dialog, self).__init__(root, **kw)
-        self.extra = None
-        self.panel = Panel(radius=[dp(26)] * 4)
-        self.add_widget(self.panel)
-        self.title = Txt(ltext=title, bold=True, font_size=sp(20), size_hint=(None, None))
-        self.msg = Txt(ltext=message, color=(0.78, 0.80, 0.85, 1), font_size=sp(15), nlines=6, keep_nl=True,
-                       valign='top', size_hint=(None, None))
-        self.panel.add_widget(self.title)
-        self.panel.add_widget(self.msg)
-        self.btns = []
-        for label, cb, kind in (buttons or [('حسناً', None, 'primary')]):
-            b = Tap(callback=(lambda w, cb=cb: self._press(cb)), size_hint=(None, None), height=dp(48))
-            b.kind = kind
-            b.fb_radius = [dp(14)] * 4
-            b.lbl = Txt(ltext=label, halign='center', bold=True, font_size=sp(16),
-                        color=(ON_ACCENT if kind == 'primary' else (1, 1, 1, 1) if kind == 'danger' else TEXT),
-                        size_hint=(None, None))
-            b.add_widget(b.lbl)
-            self.panel.add_widget(b)
-            self.btns.append(b)
-        self.place()
-
-    auto_dismiss = True
-
-    def _press(self, cb):
-        if self.auto_dismiss or cb is None:
-            self.dismiss()
-        if cb:
-            cb()
-
-    def set_extra(self, widget):
-        self.extra = widget
-        widget.size_hint = (None, None)            # we set its width ourselves (a hint would stretch it)
-        self.panel.add_widget(widget)
-        self.place()
-
-    def place(self):
-        W = self.width
-        if W <= 1 or not hasattr(self, 'btns'):
-            return
-        pw = min(W - dp(36), dp(420))
-        pad = dp(22)
-        msg_lines = 0
-        if self.msg.ltext:
-            tw = pw - 2 * pad
-            font = font_for(self.msg.ltext)
-            for part in self.msg.ltext.split('\n'):
-                msg_lines += len(textfix.wrap_text(part, tw, lambda t: measure(t, font, sp(15), False), 6) or [''])
-            msg_lines = min(6, max(1, msg_lines))
-        mh = msg_lines * sp(15) * 1.62 if self.msg.ltext else 0
-        eh = (self.extra.height + dp(10)) if self.extra is not None else 0
-        ph = pad + dp(32) + dp(10) + mh + eh + dp(20) + dp(48) + dp(18)
-        px = (self.x + self.width / 2.0) - pw / 2.0
-        if self.extra is not None:
-            py = (self.y + self.height) - dp(120) - ph       # keep clear of the keyboard
-            py = max(self.y + dp(8), py)
-        else:
-            py = (self.y + self.height / 2.0) - ph / 2.0
-        self.panel.pos = (px, py)
-        self.panel.size = (pw, ph)
-        y = py + ph - pad - dp(32)
-        self.title.pos = (px + pad, y)
-        self.title.size = (pw - 2 * pad, dp(32))
-        y -= dp(10) + mh
-        self.msg.pos = (px + pad, y)
-        self.msg.size = (pw - 2 * pad, mh)
-        if self.extra is not None:
-            y -= eh
-            self.extra.pos = (px + pad, y + dp(5))
-            self.extra.width = pw - 2 * pad
-        n = len(self.btns)
-        gap = dp(10)
-        bw = (pw - 2 * pad - gap * (n - 1)) / float(n)
-        for i, b in enumerate(self.btns):
-            # first button on the right
-            b.pos = (px + pw - pad - (i + 1) * bw - i * gap, py + dp(18))
-            b.size = (bw, dp(48))
-            b.lbl.pos = b.pos
-            b.lbl.size = b.size
-            b.canvas.before.clear()
-            with b.canvas.before:
-                if b.kind == 'primary':
-                    Color(*ACCENT)
-                elif b.kind == 'danger':
-                    Color(*DANGER)
-                else:
-                    Color(*SURFACE2)
-                RoundedRectangle(pos=b.pos, size=b.size, radius=[dp(14)])
-
-
-class PromptDialog(Dialog):
-    auto_dismiss = False
-
-    def __init__(self, root, title, text='', hint='', ok_label='حفظ', on_ok=None, message='', **kw):
-        self._on_ok = on_ok
-        super(PromptDialog, self).__init__(
-            root, title, message,
-            buttons=[(ok_label, self._submit_btn, 'primary'), ('إلغاء', None, 'plain')], **kw)
-        self.field = FieldInput(text=text, hint=hint, on_submit=self._submit_text)
-        self.field.on_resize = self.place
-        self.set_extra(self.field)
-        Clock.schedule_once(self._focus, 0.25)
-
-    def _focus(self, dt):
-        if self in self.root.overlays:
-            self.field.focus()
-
-    def _submit_btn(self):
-        self._submit_text(self.field.text)
-
-    def _submit_text(self, text):
-        text = (text or '').strip()
-        if not text:
-            return
-        self.field.release()
-        if self in self.root.overlays:
-            self.dismiss()
-        if self._on_ok:
-            self._on_ok(text)
-
-    def dismiss(self):
-        try:
-            self.field.release()
-        except Exception:
-            pass
-        super(PromptDialog, self).dismiss()
-
-
-class Toast(Widget):
-    """One-line message near the bottom, fades after ~2 s."""
-
-    def __init__(self, **kw):
-        kw.setdefault('size_hint', (None, None))
-        super(Toast, self).__init__(**kw)
-        self.lbl = Txt(ltext='', halign='center', font_size=sp(15), size_hint=(None, None),
-                       nlines=2)
-        self.add_widget(self.lbl)
-        self.opacity = 0
-        self._ev = None
-        self.size = (0, 0)
-
-    def on_touch_down(self, touch):
+        edge = dp(18)
+        at_edge = (touch.x >= Window.width - edge) if rtl.UI_RTL else (touch.x <= edge)
+        if at_edge:
+            touch.grab(self)
+            touch.ud['drawer_x0'] = touch.x
+            touch.ud['drawer_moved'] = False
         return False
 
     def on_touch_move(self, touch):
-        return False
+        if touch.grab_current is self and 'drawer_x0' in touch.ud:
+            dx = touch.x - touch.ud['drawer_x0']
+            if rtl.UI_RTL:
+                dx = -dx
+            if dx > dp(8) or touch.ud['drawer_moved']:
+                touch.ud['drawer_moved'] = True
+                self.progress = max(0.0, min(1.0, dx / self.panel.width))
+            return True
+        return super().on_touch_move(touch)
 
     def on_touch_up(self, touch):
-        return False
-
-    def show(self, text, parent_size, bottom=dp(96)):
-        W = parent_size[0]
-        w = min(W - dp(40), dp(380))
-        self.size = (w, dp(58) if len(text) > 32 else dp(46))
-        self.pos = ((W - w) / 2.0, bottom)
-        self.lbl.ltext = text
-        self.lbl.pos = (self.x + dp(16), self.y)
-        self.lbl.size = (self.width - dp(32), self.height)
-        self.canvas.before.clear()
-        with self.canvas.before:
-            Color(0, 0, 0, 0.35)                                    # shadow
-            RoundedRectangle(pos=(self.x, self.y - dp(2)), size=(self.width, self.height), radius=[dp(23)])
-            Color(0.15, 0.155, 0.185, 0.98)
-            RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(23)])
-            Color(1, 1, 1, 0.08)
-            Line(rounded_rectangle=(self.x + 0.5, self.y + 0.5, self.width - 1, self.height - 1, dp(23)),
-                 width=1)
-        self.opacity = 1
-        if self._ev:
-            self._ev.cancel()
-        self._ev = Clock.schedule_once(self._hide, 2.2)
-
-    def _hide(self, dt):
-        self.opacity = 0
-
-
-# ---------------------------------------------------------------------------
-# small building blocks used by the player and the settings
-# ---------------------------------------------------------------------------
-class Badge(Widget):
-    """Dark rounded chip with an optional icon and a short text; sizes itself to the text."""
-
-    def __init__(self, font=None, pulse=False, **kw):
-        kw.setdefault('size_hint', (None, None))
-        super(Badge, self).__init__(**kw)
-        self.pulse = pulse
-        self.icon = Icon(name='play', size=(0, 0))
-        self.lbl = Txt(halign='center', align_mode='center', font_size=font or sp(15), bold=True,
-                       size_hint=(None, None))
-        self.add_widget(self.icon)
-        self.add_widget(self.lbl)
-        self.opacity = 0
-        self._isz = 0
-        self._tw = 0
-        self._ev = None
-        self._pulse_ev = None
-        self.bind(pos=self._lay, size=self._lay)
-
-    def show(self, text, center, icon=None, duration=0.0, h=None):
-        self.lbl.ltext = text
-        tw = self.lbl.text_width() + dp(6)
-        on = icon is not None
-        if on:
-            self.icon.name = icon
-        isz = dp(20) if on else 0
-        self.icon.size = (isz, isz)
-        pad = dp(16)
-        h = h or dp(40)
-        w = pad * 2 + tw + ((isz + dp(8)) if on else 0)
-        self._isz, self._tw = isz, tw
-        self.size = (max(w, h), h)
-        self.center = center
-        self.opacity = 1
-        self.icon.opacity = 1
-        if self._ev:
-            self._ev.cancel()
-            self._ev = None
-        if duration:
-            self._ev = Clock.schedule_once(lambda dt: self.hide(), duration)
-        if self.pulse and on and self._pulse_ev is None:
-            self._pulse_ev = Clock.schedule_interval(self._beat, 0.4)
-        self._lay()
-
-    def _beat(self, dt):
-        self.icon.opacity = 0.4 if self.icon.opacity > 0.7 else 1.0
-
-    def hide(self):
-        self.opacity = 0
-        if self._ev:
-            self._ev.cancel()
-            self._ev = None
-        if self._pulse_ev:
-            self._pulse_ev.cancel()
-            self._pulse_ev = None
-
-    def _lay(self, *a):
-        self.canvas.before.clear()
-        h = self.height
-        with self.canvas.before:
-            Color(*SCRIM)
-            RoundedRectangle(pos=self.pos, size=self.size, radius=[h / 2.0])
-            Color(1, 1, 1, 0.10)
-            Line(rounded_rectangle=(self.x + 0.5, self.y + 0.5, self.width - 1, h - 1, h / 2.0), width=1)
-        pad = dp(16)
-        cy = self.y + h / 2.0
-        if self._isz:
-            self.icon.center = (self.x + pad + self._isz / 2.0, cy)
-            self.lbl.pos = (self.x + pad + self._isz + dp(8), self.y)
-            self.lbl.size = (self._tw, h)
-        else:
-            self.lbl.pos = (self.x + pad, self.y)
-            self.lbl.size = (max(2, self.width - 2 * pad), h)
-
-    def on_touch_down(self, touch):
-        return False
-
-
-class Tag(Widget):
-    """Small dark label that hugs its text (duration on a thumbnail, ...)."""
-
-    def __init__(self, font=None, **kw):
-        kw.setdefault('size_hint', (None, None))
-        super(Tag, self).__init__(**kw)
-        self.lbl = Txt(halign='center', bold=True, font_size=font or sp(11), size_hint=(None, None))
-        self.add_widget(self.lbl)
-        self.bind(pos=self._lay, size=self._lay)
-
-    @property
-    def ltext(self):
-        return self.lbl.ltext
-
-    def set_text(self, text):
-        self.lbl.ltext = text
-        self.width = (self.lbl.text_width() + dp(12)) if text else 0
-        self.height = dp(18) if text else 0
-        self._lay()
-
-    def _lay(self, *a):
-        self.canvas.before.clear()
-        self.lbl.pos = self.pos
-        self.lbl.size = self.size
-        if self.width < 2:
-            return
-        with self.canvas.before:
-            Color(0, 0, 0, 0.78)
-            RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(5)])
-
-
-class StepButton(Tap):
-    """Round arrow with the number of seconds inside it (the usual -10 / +10 buttons)."""
-
-    def __init__(self, direction, callback=None, value=10, **kw):
-        kw.setdefault('size_hint', (None, None))
-        kw.setdefault('size', (dp(52), dp(52)))
-        super(StepButton, self).__init__(callback=callback, **kw)
-        self.icon = Icon(name='step_fwd' if direction == 'fwd' else 'step_back', size=(dp(46), dp(46)),
-                         stroke=1.7)
-        self.num = Txt(ltext=str(int(value)), halign='center', align_mode='center', bold=True,
-                       font_size=sp(10), size_hint=(None, None))
-        self.add_widget(self.icon)
-        self.add_widget(self.num)
-        self.bind(pos=self._sync, size=self._sync)
-        self._sync()
-
-    def set_value(self, n):
-        self.num.ltext = str(int(n))
-
-    def _sync(self, *a):
-        cx, cy = self.x + self.width / 2.0, self.y + self.height / 2.0
-        self.icon.center = (cx, cy)
-        self.num.size = (dp(24), dp(14))
-        self.num.center = (cx, cy + dp(0.2))         # the ring of the arrow is centred on the icon box
-
-    def _set_pressed(self, v):
-        self.pressed = v
-        self.icon.opacity = 0.55 if v else 1.0
-        self.num.opacity = 0.55 if v else 1.0
-
-
-class EmptyState(Widget):
-    """A muted icon over a short message, shown when a list has nothing to show."""
-    ltext = StringProperty('')
-
-    def __init__(self, icon='folder_play', **kw):
-        kw.setdefault('size_hint', (None, None))
-        super(EmptyState, self).__init__(**kw)
-        self.icon = Icon(name=icon, size=(dp(60), dp(60)), color=[1, 1, 1, 0.2], stroke=1.2)
-        self.lbl = Txt(halign='center', align_mode='center', color=SUB, font_size=sp(16), nlines=3,
-                       size_hint=(None, None))
-        self.add_widget(self.icon)
-        self.add_widget(self.lbl)
-        self.bind(pos=self._lay, size=self._lay, ltext=self._text)
-        self._text()
-
-    def _text(self, *a):
-        self.lbl.ltext = self.ltext
-        self.opacity = 1 if self.ltext else 0
-        self._lay()
-
-    def _lay(self, *a):
-        self.lbl.pos = self.pos
-        self.lbl.size = self.size
-        self.icon.center = (self.x + self.width / 2.0, (self.y + self.height) + dp(38))
-
-    def on_touch_down(self, touch):
-        return False
-
-
-class Group(BoxLayout):
-    """A rounded card holding rows that are separated by hairlines (settings)."""
-
-    def __init__(self, inset=(dp(20), dp(20)), **kw):
-        kw.setdefault('orientation', 'vertical')
-        kw.setdefault('size_hint', (1, None))
-        super(Group, self).__init__(**kw)
-        self.inset = inset                      # (left, right) gap of the hairlines
-        self.bind(minimum_height=self.setter('height'))
-        self._rows = []
-        with self.canvas.before:
-            Color(*SURFACE)
-            self._bg = RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(20)])
-        self.bind(pos=self._geo, size=self._geo)
-
-    def add_row(self, w):
-        w.size_hint = (1, None)
-        self._rows.append(w)
-        self.add_widget(w)
-        n, r = len(self._rows), dp(20)
-        for i, row in enumerate(self._rows):
-            if isinstance(row, Tap):
-                top, bot = (r if i == 0 else 0), (r if i == n - 1 else 0)
-                row.fb_radius = [top, top, bot, bot]
-        self._geo()
-
-    def _geo(self, *a):
-        self._bg.pos = self.pos
-        self._bg.size = self.size
-        self.canvas.after.clear()
-        with self.canvas.after:
-            Color(1, 1, 1, 0.055)                                   # hairline edge of the card
-            Line(rounded_rectangle=(self.x, self.y, self.width, self.height, dp(20)), width=1)
-            Color(*DIVIDER)
-            y = self.y + self.height
-            for row in self._rows[:-1]:
-                y -= row.height
-                Rectangle(pos=(self.x + self.inset[0], y - 0.5),
-                          size=(max(0, self.width - self.inset[0] - self.inset[1]), 1))
+        if touch.grab_current is self:
+            touch.ungrab(self)
+            if touch.ud.get('drawer_moved'):
+                self.open() if self.progress > 0.35 else self.close()
+            return True
+        return super().on_touch_up(touch)
