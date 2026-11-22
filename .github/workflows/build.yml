@@ -59,6 +59,13 @@ jobs:
             echo "::notice title=dist target::$(grep -E '^target=' "$f")"
           done
 
+      - name: Use the fixed signing key (so a new APK installs over the old one)
+        run: |
+          mkdir -p ~/.android
+          cp debug.keystore ~/.android/debug.keystore
+          keytool -list -keystore ~/.android/debug.keystore -storepass android | tail -2
+          echo "::notice title=signing key::using debug.keystore from the repository"
+
       - name: Build debug APK
         run: buildozer -v android debug
 
@@ -72,6 +79,15 @@ jobs:
             echo "::warning title=APK target SDK::$T"
           else
             echo "::warning title=APK target SDK::aapt or apk not found"
+          fi
+
+      - name: Show the signing certificate of the built APK
+        if: always()
+        run: |
+          APK=$(ls bin/*.apk 2>/dev/null | head -1)
+          if [ -n "$APK" ]; then
+            F=$(unzip -p "$APK" 'META-INF/*.RSA' 'META-INF/*.DSA' 'META-INF/*.EC' 2>/dev/null | keytool -printcert 2>/dev/null | grep -E "SHA256:" | head -1)
+            echo "::warning title=APK signing certificate::$F"
           fi
 
       - name: Upload APK
