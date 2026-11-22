@@ -656,7 +656,7 @@ _loader_state = {'broken': False}
 def _remember(path, tex):
     _tex_cache[path] = tex
     _tex_cache.move_to_end(path)
-    while len(_tex_cache) > 90:
+    while len(_tex_cache) > 150:
         _tex_cache.popitem(last=False)
 
 
@@ -749,7 +749,7 @@ class Thumb(Widget):
                 # a row that is scrolling past changes its picture every few frames: wait a
                 # moment so that only pictures which stay on screen get decoded
                 req = self._req
-                self._ev = Clock.schedule_once(lambda dt, p=path, r=req: self._start_load(p, r), 0.04)
+                self._ev = Clock.schedule_once(lambda dt, p=path, r=req: self._start_load(p, r), 0.02)
         self._draw()
 
     def _start_load(self, path, req):
@@ -1112,6 +1112,8 @@ class VList(StencilView):
         self.on_reorder = None
         self.can_drag = None
         self.reorderable = False
+        self.prefetch = None             # optional: prefetch(first, last) for the rows just outside the screen
+        self._pf_rng = None
         self._t = None
         self._fling = None
         self._fling_v = 0.0
@@ -1211,6 +1213,13 @@ class VList(StencilView):
         last = min(n - 1, int((self.scroll + self.height) // rh) + 1)
         wanted = set(range(first, last + 1))
         d = self._drag
+        pf = self.prefetch
+        if pf is not None and not d and (first, last) != self._pf_rng:
+            self._pf_rng = (first, last)
+            try:
+                pf(max(0, first - 8), min(n - 1, last + 8))
+            except Exception:
+                self.prefetch = None
         if d:
             wanted.add(d['from'])
         for i in list(self.rows):

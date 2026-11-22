@@ -714,7 +714,8 @@ def new_group_flow(app, after=None):
             app.root.refresh_pages()
             if after:
                 after(gid)
-        pick_lists(app, 'اختر قوائم المجلد', lib.collections(), 'إنشاء المجلد', picked)
+        # the keyboard is still closing (the window is resizing): open the sheet when it is gone
+        Clock.schedule_once(lambda dt: pick_lists(app, 'اختر قوائم المجلد', lib.collections(), 'إنشاء المجلد', picked), 0.35)
     ask_text(app, 'مجلد جديد', '', 'اسم المجلد', named, 'التالي')
 
 
@@ -1120,6 +1121,14 @@ class ListPageMixin(object):
         self.vlist.on_long = self._long
         self.vlist.on_reorder = self._reorder
         self.vlist.can_drag = self._can_drag
+        self.vlist.prefetch = self._prefetch_rows
+
+    def _prefetch_rows(self, first, last):
+        items = self.vlist.items
+        for i in range(first, last + 1):
+            it = items[i]
+            if isinstance(it, dict) and it.get('kind') == 'video' and it.get('key'):
+                self.app.prefetch_thumb(it['key'])
 
     # overridables
     def open_item(self, idx, item):

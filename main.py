@@ -175,6 +175,23 @@ class ProPlayerApp(App):
             return None
         return self.thumbs.get(v, callback)
 
+    _prefetching = 0
+
+    def prefetch_thumb(self, key):
+        """Decode a thumbnail that is about to scroll into view (only when its file already exists), so
+        that it is ready when the row arrives."""
+        v = self.lib.videos.get(key)
+        if v is None or self._prefetching >= 6:
+            return
+        path = bridge.thumb_path(self, v)
+        if path in widgets._tex_cache or not os.path.exists(path):
+            return
+        self._prefetching += 1
+
+        def done(tex):
+            self._prefetching = max(0, self._prefetching - 1)
+        widgets.load_texture_async(path, done)
+
     def open_collection(self, cid):
         self.root.push(CollectionPage(self, cid))
 
