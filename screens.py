@@ -243,8 +243,21 @@ class ListRow(Row):
 
     def left_bound(self):
         if self.ctx and self.ctx.sel_mode:
-            return self.x + (dp(100) if self.ctx.reorder else dp(60))
+            return self.x + (dp(100) if self.ctx.reorder else dp(54))
         return self.x + dp(16)
+
+    @staticmethod
+    def fit_title(label, w, steps):
+        """Give a title the first (font size, lines) step in which the WHOLE name fits; when none does, the
+        last (smallest) step is kept.  Lets the user read the full name of a row while ordering by hand."""
+        txt = ' '.join((label.ltext or '').split())
+        label.width = w
+        for fs, n in steps:
+            label.font_size = sp(fs)
+            label.nlines = n
+            lines = label.logical_lines()
+            if len(lines) <= n and ' '.join(lines) == txt:
+                return
 
     def draw_selection(self):
         self.canvas.before.clear()
@@ -279,6 +292,8 @@ class ListRow(Row):
 
 class VideoRow(ListRow):
     kind = 'video'
+    STEPS = [(15.5, 2)]
+    STEPS_SEL = [(15.5, 2), (14, 3), (13, 3), (12, 3), (11.5, 4)]
 
     def __init__(self, **kw):
         super(VideoRow, self).__init__(**kw)
@@ -326,10 +341,11 @@ class VideoRow(ListRow):
         left = self.left_bound()
         tx_right = self.thumb.x - dp(14)
         w = max(10, tx_right - left)
-        # the title may need two lines: stack title + info as one block, centred on the thumbnail
+        self.fit_title(self.title, w, self.STEPS_SEL if ctx.sel_mode else self.STEPS)
+        # the title may need several lines: stack title + info as one block, centred on the thumbnail
         self.title.size = (w, dp(10))
         n = len(self.title.logical_lines())
-        ht = self.title.text_height(n)
+        ht = self.title.text_height(n) * (1.0 if n < 2 else 1.12)   # a little slack: tall glyphs (brackets) must not drop a line
         hi = self.info.text_height(1)
         gap = dp(1)
         top = cy + (ht + gap + hi) / 2.0
@@ -353,11 +369,13 @@ class VideoRow(ListRow):
 
 class CollRow(ListRow):
     kind = 'coll'
+    STEPS = [(17.5, 1)]
+    STEPS_SEL = [(17.5, 1), (15.5, 2), (14, 2), (13, 3), (12, 3), (11.5, 4)]
 
     def __init__(self, **kw):
         super(CollRow, self).__init__(**kw)
         self.thumb = Thumb(radius=dp(14), size=(dp(142), dp(80)))
-        self.title = Txt(font_size=sp(17.5), bold=True, valign='bottom', size_hint=(None, None))
+        self.title = Txt(font_size=sp(17.5), bold=True, valign='top', size_hint=(None, None))
         self.info = Txt(font_size=sp(13.5), color=SUB, valign='top', size_hint=(None, None))
         for w in (self.thumb, self.title, self.info):
             self.add_widget(w)
@@ -387,10 +405,17 @@ class CollRow(ListRow):
         self.thumb.pos = ((self.x + self.width) - dp(16) - tw, cy - th / 2.0 - dp(3))
         left = self.left_bound()
         w = max(10, self.thumb.x - dp(16) - left)
-        self.title.pos = (left, cy)
-        self.title.size = (w, dp(30))
-        self.info.pos = (left, cy - dp(30))
-        self.info.size = (w, dp(30))
+        self.fit_title(self.title, w, self.STEPS_SEL if ctx.sel_mode else self.STEPS)
+        self.title.size = (w, dp(10))
+        n = len(self.title.logical_lines())
+        ht = self.title.text_height(n) * (1.0 if n < 2 else 1.12)
+        hi = self.info.text_height(1)
+        gap = dp(3)
+        top = cy + (ht + gap + hi) / 2.0
+        self.title.pos = (left, top - ht)
+        self.title.size = (w, ht)
+        self.info.pos = (left, top - ht - gap - hi)
+        self.info.size = (w, hi)
         self.draw_peek(tw)
 
     def draw_peek(self, tw):
@@ -499,7 +524,7 @@ class Header(Widget):
         self.big = False
         self.bind(pos=self._lay, size=self._lay)
 
-    def set(self, title, sub='', right=(), left=(), big=False, extra=None):
+    def set(self, title, sub='', right=(), left=(), big=False, extra=None, short=''):
         for b in self.right_btns + self.left_btns:
             if b.parent is self:
                 self.remove_widget(b)
@@ -512,6 +537,7 @@ class Header(Widget):
         if extra is not None:
             self.add_widget(extra)
         self.big = big
+        self._full, self._short = title, short
         self.title.ltext = title
         self.title.font_size = sp(29) if big else sp(19.5)
         self.sub.ltext = sub
@@ -539,6 +565,16 @@ class Header(Widget):
             self.sub.size = (0, 0)
             return
         w = max(10, x_r - x_l - dp(8))
+        full, short = getattr(self, '_full', None), getattr(self, '_short', '')
+        if short and full is not None:                  # many buttons: a smaller "10 محدد", else just "10"
+            self.title.ltext = full
+            for fs in (19.5, 18, 16.5, 15.5):
+                self.title.font_size = sp(fs)
+                if self.title.text_width() <= w:
+                    break
+            else:
+                self.title.font_size = sp(19.5)
+                self.title.ltext = short
         if self.sub.ltext:
             self.title.pos = (x_l + dp(4), (self.y + self.height / 2.0) - dp(2))
             self.title.size = (w, dp(28))
@@ -1375,7 +1411,7 @@ class HomePage(Page, ListPageMixin):
             n = len(ctx.selected)
             right = [self.btn_close]
             left = self._action_buttons()
-            self.header.set('%d محدد' % n, '', right, left)
+            self.header.set('%d محدد' % n, '', right, left, short=str(n))
             return
         if self.search_on:
             self.header.set('', '', [IconButton('close', callback=lambda w: self.toggle_search(False))], [],
@@ -1407,6 +1443,7 @@ class HomePage(Page, ListPageMixin):
                 btns.append(IconButton('edit', callback=lambda w: self.act_rename()))
             btns.append(IconButton('trash', color=DANGER, callback=lambda w: self.act_delete()))
         elif self.mode == 'playlists':
+            btns.append(IconButton('folder_add', callback=lambda w: self.act_make_folder()))
             if n == 1:
                 btns.append(IconButton('edit', callback=lambda w: self.act_rename()))
             btns.append(IconButton('trash', color=DANGER, callback=lambda w: self.act_delete()))
@@ -1530,6 +1567,22 @@ class HomePage(Page, ListPageMixin):
         keys = self._selected_videos()
         if keys:
             choose_playlist(self.app, keys, after=self.exit_selection)
+
+    def act_make_folder(self):
+        """The selected playlists (in the order they have on screen) become one new folder."""
+        app = self.app
+        lib = app.lib
+        ids = [c.id for c in lib.collections() if c.id in self.ctx.selected]
+        if not ids:
+            return
+
+        def ok(name):
+            gid = lib.create_group(name, ids)
+            app.store.save()
+            app.root.say('تم إنشاء المجلد «%s» وفيه %d قائمة' % (lib.group(gid).name, len(ids)))
+            self.exit_selection()
+            app.root.refresh_pages()
+        ask_text(app, 'مجلد جديد', '', 'اسم المجلد', ok, 'إنشاء')
 
     def act_rename(self):
         sid = next(iter(self.ctx.selected))
@@ -1698,7 +1751,7 @@ class CollectionPage(Page, ListPageMixin):
                     IconButton('playlist_add', callback=lambda w: self.act_add())]
             left.append(IconButton('trash', color=DANGER, callback=lambda w: self.act_delete()))
             left.append(IconButton('dots', callback=lambda w: self.more_menu()))
-            self.header.set('%d محدد' % n, '', [self.btn_close], left)
+            self.header.set('%d محدد' % n, '', [self.btn_close], left, short=str(n))
             return
         if self.search_on:
             self.header.set('', '', [IconButton('close', callback=lambda w: self.toggle_search(False))], [],
@@ -1899,7 +1952,7 @@ class GroupPage(Page, ListPageMixin):
             left = [IconButton('select_all', callback=lambda w: self.select_all()),
                     IconButton('share', callback=lambda w: self.act_share()),
                     IconButton('trash', color=DANGER, callback=lambda w: self.act_remove())]
-            self.header.set('%d محدد' % n, '', [self.btn_close], left)
+            self.header.set('%d محدد' % n, '', [self.btn_close], left, short=str(n))
             return
         sub = core.count_lists_label(len(g.lists)) + '  •  ' + core.count_videos_label(g.count)
         self.header.set(g.name, sub, [self.btn_back], [self.btn_menu, self.btn_add])
@@ -2009,6 +2062,10 @@ class PickerPage(Page, ListPageMixin):
         super(PickerPage, self).__init__(app, **kw)
         self.cid = cid
         self.new_name = new_name
+        self.query = ''
+        self.search_on = False
+        self.field = None
+        self.all_keys = []
         self.init_list()
         self.ctx.sel_mode = True
         self.ctx.reorder = False
@@ -2018,6 +2075,7 @@ class PickerPage(Page, ListPageMixin):
         self.btn_close = IconButton('close', callback=lambda w: self.app.root.back())
         self.btn_ok = IconButton('check', color=ACCENT, callback=lambda w: self.confirm())
         self.btn_all = IconButton('select_all', callback=lambda w: self.select_all())
+        self.btn_search = IconButton('search', callback=lambda w: self.toggle_search(True))
         self.bind(pos=self._lay, size=self._lay)
         self._lay()
         self.refresh()
@@ -2029,18 +2087,62 @@ class PickerPage(Page, ListPageMixin):
         self.vlist.pos = self.pos
         self.vlist.size = (self.width, max(0, (self.y + self.height) - hh - self.y))
 
+    def _match(self, text):
+        q = self.query.strip()
+        if not q:
+            return True
+        return core.natural_key(q) == core.natural_key(text) or \
+            q.casefold() in (text or '').casefold()
+
     def refresh(self):
         lib = self.app.lib
         existing = set(lib.items(self.cid)) if self.cid else set()
-        keys = [k for k in lib.all_videos_sorted() if k not in existing]
+        self.all_keys = [k for k in lib.all_videos_sorted() if k not in existing]
+        keys = [k for k in self.all_keys if self._match(lib.title(k))]
         self.vlist.set_items([{'kind': 'video', 'key': k} for k in keys])
         self.update_header()
 
     def update_header(self):
-        title = ('«%s»  •  %d' % (self.new_name, len(self.ctx.selected))) if self.new_name \
-            else 'اختر الفيديوهات (%d)' % len(self.ctx.selected)
+        if self.search_on:
+            self.header.set('', '', [IconButton('close', callback=lambda w: self.toggle_search(False))], [],
+                            extra=self.field)
+            return
+        n = len(self.ctx.selected)
+        title = ('«%s»  •  %d' % (self.new_name, n)) if self.new_name else 'اختر الفيديوهات (%d)' % n
         self.header.set(title, 'اختر فيديو واحد على الأقل' if self.new_name else '', [self.btn_close],
-                        [self.btn_ok, self.btn_all])
+                        [self.btn_ok, self.btn_all, self.btn_search], short=str(n))
+
+    # ---- search ----------------------------------------------------------------------
+    def toggle_search(self, on):
+        if on:
+            self.field = FieldInput(text='', hint='ابحث عن فيديو…')
+            self.field.size_hint = (None, None)
+            self.field.height = dp(44)
+            self.field.ti.bind(text=self._on_query)
+            self.search_on = True
+            self.update_header()
+            Clock.schedule_once(self._focus_field, 0.15)
+        else:
+            if self.field is not None:
+                self.field.release()
+            self.search_on = False
+            self.field = None
+            self.query = ''
+            self.refresh()
+
+    def _focus_field(self, dt):
+        if self.field is not None and self.search_on:
+            self.field.focus()
+
+    def _on_query(self, inst, value):
+        self.query = value
+        self.refresh()
+
+    def on_back(self):
+        if self.search_on:
+            self.toggle_search(False)
+            return True
+        return False
 
     def on_selection_changed(self):
         self.update_header()
@@ -2063,7 +2165,8 @@ class PickerPage(Page, ListPageMixin):
         self.update_header()
 
     def confirm(self):
-        keys = [i['key'] for i in self.vlist.items if i['key'] in self.ctx.selected]
+        # every ticked video counts, also the ones a search is hiding right now
+        keys = [k for k in self.all_keys if k in self.ctx.selected]
         if self.cid is None:
             if not keys:
                 self.app.root.say('اختر فيديو واحد على الأقل لإنشاء القائمة')
