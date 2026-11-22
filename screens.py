@@ -371,6 +371,7 @@ class CollRow(ListRow):
     kind = 'coll'
     STEPS = [(17.5, 1)]
     STEPS_SEL = [(17.5, 1), (15.5, 2), (14, 2), (13, 3), (12, 3), (11.5, 4)]
+    INFO_STEPS_SEL = [(13.5, 1), (12.5, 1), (12, 2), (11.5, 2)]
 
     def __init__(self, **kw):
         super(CollRow, self).__init__(**kw)
@@ -396,7 +397,7 @@ class CollRow(ListRow):
         if self.item is None or self.ctx is None:
             return
         ctx = self.ctx
-        if self.unchanged(ctx.sel_mode, ctx.reorder, self.is_selected(), self.title.ltext):
+        if self.unchanged(ctx.sel_mode, ctx.reorder, self.is_selected(), self.title.ltext, self.info.ltext):
             return
         self.draw_selection()
         tw, th = dp(142), dp(80)
@@ -406,10 +407,12 @@ class CollRow(ListRow):
         left = self.left_bound()
         w = max(10, self.thumb.x - dp(16) - left)
         self.fit_title(self.title, w, self.STEPS_SEL if ctx.sel_mode else self.STEPS)
+        self.fit_title(self.info, w, self.INFO_STEPS_SEL if ctx.sel_mode else [(13.5, 1)])
         self.title.size = (w, dp(10))
+        self.info.size = (w, dp(10))
         n = len(self.title.logical_lines())
         ht = self.title.text_height(n) * (1.0 if n < 2 else 1.12)
-        hi = self.info.text_height(1)
+        hi = self.info.text_height(len(self.info.logical_lines()))
         gap = dp(3)
         top = cy + (ht + gap + hi) / 2.0
         self.title.pos = (left, top - ht)
@@ -1385,7 +1388,7 @@ class HomePage(Page, ListPageMixin):
             self.update_header()
             return
         self.ctx.show_path = (self.nav == 'library' and self.mode == 'folders')
-        self.ctx.reorder = bool(self.ctx.sel_mode and self.nav == 'library' and self.mode == 'playlists')
+        self.ctx.reorder = bool(self.ctx.sel_mode and self.nav == 'library' and self.mode in ('playlists', 'groups'))
         self.vlist.reorderable = self.ctx.reorder
         items = self.build_items()
         self.vlist.set_items(items)
@@ -1461,7 +1464,7 @@ class HomePage(Page, ListPageMixin):
         return btns
 
     def on_selection_changed(self):
-        self.ctx.reorder = bool(self.ctx.sel_mode and self.nav == 'library' and self.mode == 'playlists')
+        self.ctx.reorder = bool(self.ctx.sel_mode and self.nav == 'library' and self.mode in ('playlists', 'groups'))
         self.vlist.reorderable = self.ctx.reorder
         self.update_header()
         self.vlist.refresh()
@@ -1545,14 +1548,16 @@ class HomePage(Page, ListPageMixin):
 
     def _reorder(self, src, dst):
         items = list(self.vlist.items)
-        if not (self.nav == 'library' and self.mode == 'playlists'):
+        if not (self.nav == 'library' and self.mode in ('playlists', 'groups')):
             self.vlist.set_items(items)
             return
-        dst = max(dst, 1 if items and items[0]['kind'] == 'create' else 0)
+        dst = max(dst, 1 if items and items[0]['kind'] in ('create', 'gcreate') else 0)
         it = items.pop(src)
         items.insert(dst, it)
-        ids = [i['coll'].id for i in items if i['kind'] == 'coll']
-        self.app.lib.set_collections_order(ids)
+        if self.mode == 'groups':
+            self.app.lib.set_groups_order([i['coll'].id for i in items if i['kind'] == 'group'])
+        else:
+            self.app.lib.set_collections_order([i['coll'].id for i in items if i['kind'] == 'coll'])
         self.vlist.set_items(items)
 
     def _selected_videos(self):
@@ -1578,20 +1583,52 @@ class HomePage(Page, ListPageMixin):
             choose_playlist(self.app, keys, after=self.exit_selection)
 
     def act_make_folder(self):
-        """The selected playlists (in the order they have on screen) become one new folder."""
+        """The selected playlists (in the order they have on screen) go into a NEW folder or into one
+        of the folders that already exist."""
         app = self.app
         lib = app.lib
         ids = [c.id for c in lib.collections() if c.id in self.ctx.selected]
         if not ids:
             return
 
-        def ok(name):
-            gid = lib.create_group(name, ids)
+        def finish(msg):
             app.store.save()
-            app.root.say('تم إنشاء المجلد «%s» وفيه %d قائمة' % (lib.group(gid).name, len(ids)))
+            app.root.say(msg)
             self.exit_selection()
             app.root.refresh_pages()
-        ask_text(app, 'مجلد جديد', '', 'اسم المجلد', ok, 'إنشاء')
+
+        def new_folder():
+            def ok(name):
+                gid = lib.create_group(name, ids)
+                finish('تم إنشاء المجلد «%s» وفيه %d قائمة' % (lib.group(gid).name, len(ids)))
+            ask_text(app, 'مجلد جديد', '', 'اسم المجلد', ok, 'إنشاء')
+
+        groups = lib.groups()
+        if not groups:
+            new_folder()
+            return
+
+        def build():
+            rows = [SheetTitle('وضع القوائم في مجلد'),
+                    SheetRow('مجلد جديد', icon='folder_add', callback=lambda w: choose(None))]
+            for g in groups:
+                rows.append(SheetRow(g.name, icon='folder', value=core.count_lists_label(len(g.lists)),
+                                     callback=lambda w, gid=g.id: choose(gid)))
+            return rows
+        sheet = MenuSheet(app.root, build)
+
+        def choose(gid):
+            sheet.dismiss()
+            if gid is None:
+                new_folder()
+                return
+            n = lib.add_to_group(gid, ids)
+            nm = lib.group(gid).name
+            if n:
+                finish('تمت إضافة %d قائمة إلى المجلد «%s»' % (n, nm))
+            else:
+                finish('القوائم موجودة بالفعل في المجلد «%s»' % nm)
+        sheet.show()
 
     def act_rename(self):
         sid = next(iter(self.ctx.selected))

@@ -296,7 +296,7 @@ def pretty_title(name):
     return ' '.join(str(name).replace('_', ' ').split()) or str(name)
 
 
-BUILD = 'r21'                # shown at the bottom of the settings: tells which upload is installed
+BUILD = 'r22'                # shown at the bottom of the settings: tells which upload is installed
 MIN_RESUME = 3.0          # seconds: less than this watched = starts from zero, no progress bar
 
 
@@ -329,6 +329,7 @@ class Store(object):
             'hidden_colls': [],
             'deleted_playlists': {},
             'groups': {},
+            'group_order': [],
             'settings': {},
         }
 
@@ -700,8 +701,11 @@ class Library(object):
     def groups(self):
         by_id = {c.id: c for c in self.collections()}
         res = [self._make_group(gid, g, by_id) for gid, g in self.store.data['groups'].items()]
-        res.sort(key=lambda c: natural_key(c.name))
-        return res
+        pos = {c: i for i, c in enumerate(self.store.data['group_order'])}
+        known = sorted([c for c in res if c.id in pos], key=lambda c: pos[c.id])
+        new = [c for c in res if c.id not in pos]
+        new.sort(key=lambda c: natural_key(c.name))
+        return known + new
 
     def group(self, cid):
         gid = cid[2:] if cid.startswith('g:') else cid
@@ -730,6 +734,7 @@ class Library(object):
     def delete_group(self, cid):
         """Only the folder goes; the lists inside it (and all videos) stay."""
         if self.store.data['groups'].pop(cid[2:], None) is not None:
+            self.store.data['group_order'] = [g for g in self.store.data['group_order'] if g != cid]
             self.store.mark()
 
     def add_to_group(self, cid, list_ids):
@@ -758,6 +763,11 @@ class Library(object):
             rest = [c for c in g['lists'] if c not in set(list_ids)]
             g['lists'] = list(list_ids) + rest
             self.store.mark()
+
+    def set_groups_order(self, ids):
+        """The folders in the order the user arranged them (new folders come after, by name)."""
+        self.store.data['group_order'] = list(ids)
+        self.store.mark()
 
     def set_collections_order(self, ids):
         self.store.data['coll_order'] = list(ids)
