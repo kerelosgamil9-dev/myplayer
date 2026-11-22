@@ -331,7 +331,7 @@ class VideoRow(ListRow):
             return
         ctx = self.ctx
         if self.unchanged(ctx.sel_mode, ctx.reorder, self.is_selected(), self.badge.ltext,
-                          round(self.frac, 3)):
+                          round(self.frac, 3), self.title.ltext):
             return
         self.draw_selection()
         tw, th = dp(128), dp(72)
@@ -396,7 +396,7 @@ class CollRow(ListRow):
         if self.item is None or self.ctx is None:
             return
         ctx = self.ctx
-        if self.unchanged(ctx.sel_mode, ctx.reorder, self.is_selected()):
+        if self.unchanged(ctx.sel_mode, ctx.reorder, self.is_selected(), self.title.ltext):
             return
         self.draw_selection()
         tw, th = dp(142), dp(80)
