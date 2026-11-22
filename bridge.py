@@ -882,7 +882,7 @@ def _set_padding_ui(left, top, right, bottom):
 
 
 def refresh_insets():
-    """Pad the activity's content view by the system bars (and keyboard).  Android 15+ draws apps that
+    """Pad the activity's content view by the system bars (not the keyboard).  Android 15+ draws apps that
     target API 35 edge to edge, under the bars.  The insets are READ here, on the Python thread, and only
     the padding itself is set on the UI thread.  (An OnApplyWindowInsetsListener written in Python ran on
     the UI thread, and when it returned null the system crashed the whole app with a NullPointerException.)"""
@@ -896,8 +896,10 @@ def refresh_insets():
             if wi is None:
                 return
             bars = wi.getInsets(_INSETS['mask'])
-            ime = wi.getInsets(_INSETS['ime'])
-            pad = (int(bars.left), int(bars.top), int(bars.right), int(max(bars.bottom, ime.bottom)))
+            # The keyboard is NOT added to the padding: it used to shrink the whole window while it was
+            # open and, when it closed, the window grew back a moment AFTER the layout did (header and
+            # tabs cut off, black strip at the bottom).  Dialogs sit at the top, clear of the keyboard.
+            pad = (int(bars.left), int(bars.top), int(bars.right), int(bars.bottom))
         if pad != _INSETS['pad']:
             _INSETS['pad'] = pad
             _set_padding_ui(*pad)
