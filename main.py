@@ -1,0 +1,248 @@
+# -*- coding: utf-8 -*-
+"""
+Pro Player - a video player with Arabic UI, device-album playlists, manual
+ordering by drag, hold-to-speed-up and many player features.
+
+Run on PC for a quick look:   PROPLAYER_DIR=/path/with/videos python main.py
+"""
+import os
+import sys
+import traceback
+
+os.environ.setdefault('KIVY_NO_ARGS', '1')
+
+from kivy.config import Config                                   # noqa: E402
+
+Config.set('kivy', 'exit_on_escape', '0')
+Config.set('input', 'mouse', 'mouse,multitouch_on_demand')
+
+from kivy.app import App                                          # noqa: E402
+from kivy.clock import Clock                                      # noqa: E402
+from kivy.core.window import Window                               # noqa: E402
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+
+IMPORT_ERROR = None
+try:
+    import bridge                                                 # noqa: E402
+    import core                                                   # noqa: E402
+    import widgets                                                # noqa: E402
+    from screens import CollectionPage, GroupPage, HomePage, PickerPage, Root   # noqa: E402
+except Exception:
+    IMPORT_ERROR = traceback.format_exc()
+    core = None
+
+
+def error_view(text):
+    """Plain Kivy widgets only: shows a traceback on screen so it can be photographed."""
+    from kivy.uix.boxlayout import BoxLayout
+    from kivy.uix.button import Button
+    from kivy.uix.label import Label
+    from kivy.uix.scrollview import ScrollView
+    box = BoxLayout(orientation='vertical', padding=10, spacing=10)
+    sv = ScrollView(size_hint=(1, 1))
+    lab = Label(text=text, size_hint_y=None, halign='left', valign='top', font_size='12sp',
+                text_size=(Window.width - 30, None), color=(1, 0.8, 0.8, 1))
+    lab.bind(texture_size=lambda inst, val: setattr(inst, 'height', val[1] + 20))
+    sv.add_widget(lab)
+    box.add_widget(sv)
+    btn = Button(text='Close', size_hint=(1, None), height=90)
+    box.add_widget(btn)
+    return box, btn
+
+
+class ProPlayerApp(App):
+    title = 'Pro Player'
+
+    def build(self):
+        try:
+            if IMPORT_ERROR:
+                raise RuntimeError(IMPORT_ERROR)
+            return self._build()
+        except Exception:
+            tb = traceback.format_exc()
+            Window.clearcolor = (0.1, 0, 0, 1)
+            view, btn = error_view('STARTUP ERROR\n\n' + tb)
+            btn.bind(on_release=lambda *a: self.stop())
+            return view
+
+    def _install_error_overlay(self):
+        from kivy.base import ExceptionHandler, ExceptionManager
+        app = self
+
+        class Handler(ExceptionHandler):
+            def handle_exception(self, inst):
+                try:
+                    app.show_error(traceback.format_exc())
+                except Exception:
+                    pass
+                return ExceptionManager.PASS
+        ExceptionManager.add_handler(Handler())
+
+    def show_error(self, tb):
+        if getattr(self, '_err_view', None) is not None:
+            return
+        view, btn = error_view('ERROR (the app is still running)\n\n' + tb)
+        self._err_view = view
+        Window.add_widget(view)
+
+        def close(*a):
+            Window.remove_widget(view)
+            self._err_view = None
+        btn.bind(on_release=close)
+
+    def _build(self):
+        self._err_view = None
+        self._install_error_overlay()
+        widgets.register_fonts()
+        Window.clearcolor = (0, 0, 0, 1)
+        bridge.setup_window_insets(widgets.BG_INT)
+        self.store = core.Store(os.path.join(bridge.data_dir(self), 'library.json'), background=True)
+        self.lib = core.Library(self.store)
+        self.thumbs = bridge.ThumbService(self)
+        self.loaded = False
+        self.permitted = False
+        self.prev_crash = bridge.init_crumbs(self)
+        bridge.install_crash_logger()
+        self.root = Root(self)
+        self.home = HomePage(self)
+        self.root.push(self.home)
+        Window.bind(on_keyboard=self._on_keyboard)
+        Clock.schedule_once(lambda dt: self.start_up(), 0.2)
+        if self.prev_crash:
+            Clock.schedule_once(lambda dt: self.show_error(
+                'PREVIOUS RUN ENDED ABRUPTLY. Last steps:\n\n' + self.prev_crash), 1.0)
+        Clock.schedule_interval(lambda dt: self.store.save(), 20)
+        Clock.schedule_once(self._check_thumbs, 15)
+        Clock.schedule_once(self._tune_runtime, 1.0)
+        return self.root
+
+    def _tune_runtime(self, dt):
+        """Fewer pauses while scrolling: everything built at startup is excluded from the garbage
+        collector's scans, and it runs much less often; pictures are uploaded one per frame."""
+        import gc
+        try:
+            gc.collect()
+            gc.freeze()
+            gc.set_threshold(40000, 20, 20)
+        except Exception:
+            pass
+        try:
+            from kivy.loader import Loader
+            Loader.max_upload_per_frame = 1
+        except Exception:
+            pass
+
+    def _check_thumbs(self, dt):
+        t = getattr(self, 'thumbs', None)
+        if t and t.failed and bridge.LAST_THUMB_ERROR[0] and \
+                not any(f.endswith('.jpg') for f in os.listdir(bridge.cache_dir(self))):
+            self.show_error('THUMBNAILS FAILED:\n\n' + bridge.LAST_THUMB_ERROR[0])
+
+    # ---- startup / scanning ------------------------------------------------------
+    def start_up(self):
+        bridge.request_permissions(self._perm_result)
+
+    def _perm_result(self, ok):
+        self.permitted = ok
+        if not ok:
+            self.loaded = True
+            self.home.rebuild()
+            self.root.say('يلزم السماح بالوصول إلى الفيديوهات')
+            return
+        self.rescan()
+
+    def rescan(self, manual=False):
+        if not bridge.has_permissions():
+            bridge.request_permissions(self._perm_result)
+            return
+
+        def done(videos):
+            self.lib.set_catalog(videos)
+            self.loaded = True
+            self.permitted = True
+            self.root.refresh_pages()
+            if manual:
+                self.root.say('تم العثور على %d فيديو' % len(videos))
+        bridge.scan_videos_async(done)
+
+    # ---- helpers used by pages -------------------------------------------------------
+    def thumb(self, key, callback):
+        v = self.lib.videos.get(key)
+        if v is None:
+            return None
+        return self.thumbs.get(v, callback)
+
+    _prefetching = 0
+
+    def prefetch_thumb(self, key):
+        """Decode a thumbnail that is about to scroll into view (only when its file already exists), so
+        that it is ready when the row arrives."""
+        v = self.lib.videos.get(key)
+        if v is None or self._prefetching >= 6:
+            return
+        path = bridge.thumb_path(self, v)
+        if path in widgets._tex_cache or not os.path.exists(path):
+            return
+        self._prefetching += 1
+
+        def done(tex):
+            self._prefetching = max(0, self._prefetching - 1)
+        widgets.load_texture_async(path, done)
+
+    def open_collection(self, cid):
+        self.root.push(CollectionPage(self, cid))
+
+    def open_group(self, gid):
+        self.root.push(GroupPage(self, gid))
+
+    def open_picker(self, cid, new_name=None):
+        self.root.push(PickerPage(self, cid, new_name=new_name))
+
+    def play(self, keys, index, cid=None):
+        from player import PlayerPage          # imported lazily: needs ffpyplayer
+        if not keys:
+            return
+        self.root.push(PlayerPage(self, keys, index, cid))
+
+    # ---- android keys / lifecycle -----------------------------------------------------
+    def _on_keyboard(self, window, key, scancode=None, codepoint=None, modifier=None, **kw):
+        if key == 27:
+            return self.root.back()
+        return False
+
+    def _player(self):
+        page = self.root.pages[-1] if self.root.pages else None
+        return page if hasattr(page, 'on_app_pause') else None
+
+    def on_pause(self):
+        p = self._player()
+        if p:
+            p.on_app_pause()
+        self.store.save(force=True)
+        bridge.crumb('paused')
+        return True
+
+    def on_resume(self):
+        bridge.crumb('resumed')
+        p = self._player()
+        if p:
+            p.on_app_resume()
+        else:
+            self.rescan()
+
+    def on_stop(self):
+        try:
+            p = self._player()
+            if p:
+                p.on_close()
+            self.store.save(force=True)
+            bridge.crumb('clean-exit')
+        except Exception:
+            traceback.print_exc()
+
+
+if __name__ == '__main__':
+    ProPlayerApp().run()
