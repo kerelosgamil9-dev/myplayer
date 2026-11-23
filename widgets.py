@@ -8,6 +8,7 @@ widgets.py - all custom widgets (pure Python, no .kv files):
 import math
 import os
 import time
+from time import perf_counter as _pc      # (tests replace `time` by a fake clock)
 from collections import OrderedDict
 
 from kivy.animation import Animation
@@ -998,6 +999,71 @@ class FieldInput(FloatLayout):
 # ---------------------------------------------------------------------------
 # virtualised list with selection + drag reordering
 # ---------------------------------------------------------------------------
+# Cheap always-on counters for the frame-rate meter (Me page -> "عداد الإطارات"): how long the list spent
+# laying out / binding rows since the meter last looked.
+PERF = {'relayout_s': 0.0, 'relayouts': 0, 'binds': 0, 'bind_s': 0.0}
+
+
+class PerfHud(Label):
+    """Frame-rate meter: FPS, the worst frame and how much of the time went into the list.  Tells
+    apart "Python is slow" (list ms high) from "the GPU / system is slow" (frames slow, list ms low)."""
+
+    def __init__(self, **kw):
+        kw.setdefault('size_hint', (None, None))
+        kw.setdefault('size', (dp(300), dp(44)))
+        kw.setdefault('font_size', sp(10.5))
+        kw.setdefault('halign', 'left')
+        kw.setdefault('valign', 'middle')
+        kw.setdefault('color', (1, 1, 0.6, 1))
+        super(PerfHud, self).__init__(**kw)
+        self.bind(size=lambda w, v: setattr(w, 'text_size', v))
+        with self.canvas.before:
+            Color(0, 0, 0, 0.6)
+            self._bg = Rectangle(pos=self.pos, size=self.size)
+        self.bind(pos=self._bgmove, size=self._bgmove)
+        self._t0 = time.time()
+        self._n = 0
+        self._worst = 0.0
+        self._slow = 0
+        self._ev = None
+
+    def _bgmove(self, *a):
+        self._bg.pos, self._bg.size = self.pos, self.size
+
+    def start(self):
+        if self._ev is None:
+            self._t0 = time.time()
+            self._n = self._slow = 0
+            self._worst = 0.0
+            self._ev = Clock.schedule_interval(self._tick, 0)
+
+    def stop(self):
+        if self._ev is not None:
+            self._ev.cancel()
+            self._ev = None
+
+    def _tick(self, dt):
+        self._n += 1
+        ms = dt * 1000.0
+        if ms > self._worst:
+            self._worst = ms
+        if ms > 34:
+            self._slow += 1
+        now = time.time()
+        span = now - self._t0
+        if span < 1.0:
+            return
+        p = PERF
+        calls = max(1, p['relayouts'])
+        self.text = ('FPS %d   worst %d ms   slow(>34ms) %d\n'
+                     'list %.2f ms/frame   rows bound %d (%.1f ms)' % (
+                         round(self._n / span), self._worst, self._slow,
+                         p['relayout_s'] * 1000.0 / calls, p['binds'], p['bind_s'] * 1000.0))
+        p['relayout_s'] = p['bind_s'] = 0.0
+        p['relayouts'] = p['binds'] = 0
+        self._t0, self._n, self._worst, self._slow = now, 0, 0.0, 0
+
+
 class Row(Widget):
     """Base class for list rows. Subclasses implement fill() and relayout().
 
@@ -1193,12 +1259,21 @@ class VList(StencilView):
         car = row._car
         car.vy = vy
         car.put(vy)
+        _t = _pc()
         row.bind_item(item, i, self.ctx)          # one layout, at the final geometry
+        PERF['binds'] += 1
+        PERF['bind_s'] += _pc() - _t
         self._holder.add_widget(car)
         self.rows[i] = row
         return row
 
     def relayout(self, *a):
+        _t0 = _pc()
+        self._relayout()
+        PERF['relayouts'] += 1
+        PERF['relayout_s'] += _pc() - _t0
+
+    def _relayout(self):
         if self.height <= 1:
             return
         n = len(self.items)

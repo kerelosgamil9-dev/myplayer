@@ -17,7 +17,7 @@ import core
 import textfix
 from widgets import (ACCENT, ACCENT_SOFT, BG, DANGER, DIVIDER, SUB, SURFACE, SURFACE2, TEXT,
                      ChipsRow, Dialog, EmptyState, FieldInput, Group, Icon, IconButton, MenuSheet,
-                     PromptDialog, Row, SettingRow, SheetButton, SheetLabel, SheetRow, SheetTitle, PillSwitch, Thumb, Tag, Toast, Txt, VList, make_scroll)
+                     PerfHud, PromptDialog, Row, SettingRow, SheetButton, SheetLabel, SheetRow, SheetTitle, PillSwitch, Thumb, Tag, Toast, Txt, VList, make_scroll)
 
 
 # ---------------------------------------------------------------------------
@@ -79,6 +79,7 @@ class Root(FloatLayout):
         self._covered = []           # (page, [pages taken out of the tree while it is on top])
         self.toast = Toast()
         self.add_widget(self.toast)
+        self.hud = None
         self._guard_until = 0.0
         self._eaten = set()
 
@@ -112,6 +113,27 @@ class Root(FloatLayout):
             self.add_widget(ov)
         self.remove_widget(self.toast)
         self.add_widget(self.toast)
+        if self.hud is not None and self.hud.parent is self:
+            self.remove_widget(self.hud)
+            self.add_widget(self.hud)
+
+    def set_hud(self, on):
+        """The frame-rate meter (Me page): a small box in the top corner, over everything."""
+        if on:
+            if self.hud is None:
+                self.hud = PerfHud()
+            if self.hud.parent is None:
+                self.add_widget(self.hud)
+            self.hud.pos = (dp(8), dp(28))
+            self.hud.start()
+        elif self.hud is not None:
+            self.hud.stop()
+            if self.hud.parent is self:
+                self.remove_widget(self.hud)
+
+    def on_size(self, *a):
+        if self.hud is not None and self.hud.parent is self:
+            self.hud.pos = (dp(8), dp(28))
 
     def push(self, page):
         self.pages.append(page)
@@ -975,6 +997,8 @@ class SettingsPane(FloatLayout):
 
     def put(self, key, value):
         self.app.store.set_setting(key, value)
+        if key == 'perf_hud':
+            self.app.root.set_hud(bool(value))
 
     def card(self, title, rows):
         """A heading and a rounded card with the given rows."""
@@ -1022,6 +1046,7 @@ class SettingsPane(FloatLayout):
         n_back = len(lib.restorable())
         self.card('عام', [
             self.switch('vibrate', 'الاهتزاز', 'عند تحديد العناصر', 'bolt'),
+            self.switch('perf_hud', 'عداد الإطارات (للفحص)', 'يعرض FPS أثناء السكرول', 'tune'),
             SettingRow('استعادة القوائم المحذوفة', '', icon='restore',
                        value=('%d' % n_back) if n_back else '—', callback=lambda w: self.restore())])
         tsdk = bridge.target_sdk()

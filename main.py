@@ -109,6 +109,8 @@ class ProPlayerApp(App):
         self.root = Root(self)
         self.home = HomePage(self)
         self.root.push(self.home)
+        if self.store.setting('perf_hud'):
+            self.root.set_hud(True)
         Window.bind(on_keyboard=self._on_keyboard)
         Clock.schedule_once(lambda dt: self.start_up(), 0.2)
         if self.prev_crash:

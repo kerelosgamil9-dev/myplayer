@@ -44,6 +44,7 @@ DEFAULT_SETTINGS = {
     'keep_awake': True,
     'auto_rotate': True,
     'vibrate': True,
+    'perf_hud': False,
     'sub_size': 22,
     'sub_on': True,
     'videos_sort': {'mode': 'date', 'asc': False},
@@ -296,7 +297,7 @@ def pretty_title(name):
     return ' '.join(str(name).replace('_', ' ').split()) or str(name)
 
 
-BUILD = 'r25'                # shown at the bottom of the settings: tells which upload is installed
+BUILD = 'r26'                # shown at the bottom of the settings: tells which upload is installed
 MIN_RESUME = 3.0          # seconds: less than this watched = starts from zero, no progress bar
 
 
