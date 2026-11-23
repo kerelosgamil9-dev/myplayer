@@ -1031,10 +1031,15 @@ class PlayerPage(Page):
         touch.grab(self)
         now = time.time()
         self._release_hold()                       # never leave a previous hold running
+        # A finger that lands on the screen edge is (probably) the system's: the pull-down for the
+        # notification shade / quick settings, the back or home gesture.  It must never also turn the
+        # volume, the brightness or the position.
+        edge = (touch.y > self.top - dp(44) or touch.y < self.y + dp(30) or
+                touch.x < self.x + dp(24) or touch.x > self.right - dp(24))
         self.g = {'uid': touch.uid, 'sx': touch.x, 'sy': touch.y, 'mode': None, 'time': now,
-                  'moved': False}
+                  'moved': False, 'edge': edge}
         # no hold-to-speed while the user is tapping quickly (double-tap skips)
-        if not self.locked and now - self._last_up > 0.45:
+        if not self.locked and not edge and now - self._last_up > 0.45:
             self.g['ev'] = Clock.schedule_once(self._hold_start, 0.4)
         return True
 
@@ -1080,7 +1085,10 @@ class PlayerPage(Page):
         g = self.g
         if touch.grab_current is self and g and g['uid'] == touch.uid:
             dx, dy = touch.x - g['sx'], touch.y - g['sy']
-            if g['mode'] is None and not self.locked and self.store.setting('gestures'):
+            if g['mode'] is None and g.get('edge'):
+                if max(abs(dx), abs(dy)) > dp(16):
+                    g['moved'] = True
+            elif g['mode'] is None and not self.locked and self.store.setting('gestures'):
                 if max(abs(dx), abs(dy)) > dp(16):
                     g['moved'] = True
                     ev = g.get('ev')
