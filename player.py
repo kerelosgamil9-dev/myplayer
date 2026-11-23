@@ -574,15 +574,17 @@ class PlayerPage(Page):
             self.cursor = 0
         else:
             return False
-        self._start_current(start=0.0)
+        self._start_current()                    # carries on where that video was left (if 'resume' is on)
         return True
 
     def prev(self):
-        if self.engine.position > 3 or self.cursor == 0:
+        """Always the previous video, however far into this one we are (it carries on where it was left).
+        Only on the first video does it restart the current one."""
+        if self.cursor == 0:
             self.engine.seek(0)
             return
         self.cursor -= 1
-        self._start_current(start=0.0)
+        self._start_current()
 
     def _apply_repeat_order(self):
         cur_idx = self._current_index()
