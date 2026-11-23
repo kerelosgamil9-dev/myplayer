@@ -395,6 +395,7 @@ class PlayerPage(Page):
         self._ended = False
         self._last_up = 0.0
         self._place_key = None
+        self._cut = (0, 0, 0, 0)               # camera hole / notch (left, top, right, bottom) in px
         self._cur_txt = None
         self._dur_txt = None
         self.perf_on = False                    # performance overlay (player menu)
@@ -944,6 +945,9 @@ class PlayerPage(Page):
         W, H = self.size
         x0, y0 = self.pos
         land = W > H
+        cl, ct, cr, cb = self._cut                  # the camera hole: keep the bars and buttons clear of it
+        H -= ct
+        x0, W = x0 + cl, W - cl - cr
         pad = dp(28) if land else dp(10)
         top_h = dp(66)
         bot_h = dp(138)
@@ -1051,6 +1055,10 @@ class PlayerPage(Page):
 
     def _hold_watchdog(self, dt):
         """If the finger is gone but the 2x is still running (lost touch-up), stop it."""
+        cut = bridge.cutout_insets()
+        if cut != self._cut:                        # the camera hole moved (rotation) or was only just reported
+            self._cut = cut
+            self._lay()
         if not self.hold_active:
             return
         try:

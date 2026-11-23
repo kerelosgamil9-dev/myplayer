@@ -7,6 +7,7 @@ Every function degrades gracefully on desktop so the app can be tried on a PC
 import hashlib
 import os
 import threading
+import time as _time
 import traceback
 
 from kivy.clock import Clock
@@ -972,6 +973,32 @@ def _immersive_ui(on):
         decor.setSystemUiVisibility(flags)
     except Exception:
         log(traceback.format_exc())
+
+
+_CUT = {'t': 0.0, 'v': (0, 0, 0, 0)}
+
+
+def cutout_insets():
+    """(left, top, right, bottom) in pixels taken by the camera hole / notch.  The full-screen player draws
+    right under it, so its bars and buttons have to stay clear of this area.  Cached for half a second."""
+    if not ANDROID:
+        return (0, 0, 0, 0)
+    now = _time.time()
+    if now - _CUT['t'] < 0.5:
+        return _CUT['v']
+    _CUT['t'] = now
+    try:
+        if sdk_int() >= 28:
+            decor = _INSETS['decor'] or _activity().getWindow().getDecorView()
+            wi = decor.getRootWindowInsets()
+            if wi is not None:
+                dc = wi.getDisplayCutout()
+                _CUT['v'] = (0, 0, 0, 0) if dc is None else (
+                    int(dc.getSafeInsetLeft()), int(dc.getSafeInsetTop()),
+                    int(dc.getSafeInsetRight()), int(dc.getSafeInsetBottom()))
+    except Exception:
+        log(traceback.format_exc())
+    return _CUT['v']
 
 
 def set_immersive(on):
