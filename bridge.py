@@ -623,16 +623,25 @@ def _make_thumb_android(video, out):
 
 
 class ThumbService(object):
-    """Generates JPEG thumbnails one by one in a background thread."""
+    """Generates JPEG thumbnails in background threads.
+
+    What the person is looking at comes first: a row that has just appeared goes to the FRONT of the
+    queue (newest first), and rows that were scrolled past long ago are dropped from it - they ask
+    again if they come back.  Everything else (``warm``) is made in the background, only when nothing
+    on screen is waiting."""
+    WORKERS = 2
+    MAX_URGENT = 24
 
     def __init__(self, app):
         self.app = app
         self.lock = threading.Lock()
-        self.queue = []
+        self.queue = []                  # urgent: the last entry is made first
+        self.bg = []                     # background: made in order, when `queue` is empty
         self.pending = set()
         self.failed = set()
         self.callbacks = {}
-        self.running = False
+        self.workers = 0
+        self.bg_busy = False
 
     def get(self, video, callback=None):
         """Return the cached thumbnail path or None (and generate it)."""
@@ -645,37 +654,82 @@ class ThumbService(object):
         with self.lock:
             if callback:
                 self.callbacks.setdefault(key, []).append(callback)
-            if key not in self.pending:
+            if key in self.pending:
+                self._bump(key)
+            else:
                 self.pending.add(key)
                 self.queue.append((video, out))
-            if not self.running:
-                self.running = True
-                threading.Thread(target=self._work, daemon=True).start()
+            while len(self.queue) > self.MAX_URGENT:          # scrolled past: they will ask again
+                v, o = self.queue.pop(0)
+                self.pending.discard(v['path'])
+                self.callbacks.pop(v['path'], None)
+            self._spawn()
         return None
+
+    def _bump(self, key):
+        """Already waiting: make it the next one (it is on screen again)."""
+        for lst in (self.queue, self.bg):
+            for i, (v, o) in enumerate(lst):
+                if v['path'] == key:
+                    item = lst.pop(i)
+                    self.queue.append(item)
+                    return
+
+    def warm(self, videos):
+        """Queue every missing thumbnail for the background (call once the library is known)."""
+        if not ANDROID:
+            return
+        with self.lock:
+            for v in videos:
+                key = v['path']
+                if key in self.pending or key in self.failed:
+                    continue
+                self.pending.add(key)
+                self.bg.append((v, thumb_path(self.app, v)))
+            self._spawn()
+
+    def _spawn(self):
+        """(lock held) start workers while there is work."""
+        n = len(self.queue) + len(self.bg)
+        while self.workers < min(self.WORKERS, max(1, n)) and n:
+            self.workers += 1
+            threading.Thread(target=self._work, daemon=True).start()
+            n -= 1
 
     def prioritise(self, key):
         with self.lock:
-            for i, (v, o) in enumerate(self.queue):
-                if v['path'] == key:
-                    self.queue.insert(0, self.queue.pop(i))
-                    break
+            self._bump(key)
+
+    def _next(self):
+        """(item, is_background) - or (None, False) when this worker has nothing to do.  Only ONE worker
+        at a time makes background thumbnails, so warming up never takes the whole phone."""
+        with self.lock:
+            if self.queue:
+                return self.queue.pop(), False
+            if self.bg and not self.bg_busy:
+                self.bg_busy = True
+                return self.bg.pop(0), True
+            self.workers -= 1
+            return None, False
 
     def _work(self):
         while True:
-            with self.lock:
-                if not self.queue:
-                    self.running = False
-                    return
-                video, out = self.queue.pop(0)
-            ok = False
-            try:
-                os.makedirs(os.path.dirname(out), exist_ok=True)
-                ok = _make_thumb_android(video, out)
-            except Exception:
-                LAST_THUMB_ERROR[0] = traceback.format_exc()[-300:]
-                log('thumb failed', video['path'])
+            item, is_bg = self._next()
+            if item is None:
+                return
+            video, out = item
             key = video['path']
+            ok = os.path.exists(out)
+            if not ok:
+                try:
+                    os.makedirs(os.path.dirname(out), exist_ok=True)
+                    ok = _make_thumb_android(video, out)
+                except Exception:
+                    LAST_THUMB_ERROR[0] = traceback.format_exc()[-300:]
+                    log('thumb failed', key)
             with self.lock:
+                if is_bg:
+                    self.bg_busy = False
                 self.pending.discard(key)
                 cbs = self.callbacks.pop(key, [])
                 if not ok:
@@ -683,6 +737,8 @@ class ThumbService(object):
             if ok:
                 for cb in cbs:
                     Clock.schedule_once(lambda dt, cb=cb, out=out: cb(out), 0)
+            if is_bg:
+                _time.sleep(0.03)             # breathe: the picture on screen matters more
 
     def clear_cache(self):
         d = cache_dir(self.app)

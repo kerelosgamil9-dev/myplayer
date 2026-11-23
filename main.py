@@ -166,6 +166,7 @@ class ProPlayerApp(App):
             self.loaded = True
             self.permitted = True
             self.root.refresh_pages()
+            Clock.schedule_once(lambda dt: self.thumbs.warm(list(self.lib.videos.values())), 4)
             if manual:
                 self.root.say('تم العثور على %d فيديو' % len(videos))
         bridge.scan_videos_async(done)
