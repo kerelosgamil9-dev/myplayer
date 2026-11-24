@@ -297,7 +297,7 @@ def pretty_title(name):
     return ' '.join(str(name).replace('_', ' ').split()) or str(name)
 
 
-BUILD = 'r27'                # shown at the bottom of the settings: tells which upload is installed
+BUILD = 'r28'                # shown at the bottom of the settings: tells which upload is installed
 MIN_RESUME = 3.0          # seconds: less than this watched = starts from zero, no progress bar
 
 

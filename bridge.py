@@ -555,6 +555,33 @@ def _brightness(bmp):
 DARK_LIMIT = 14.0            # a frame darker than this is a black screen, not a picture
 
 
+def _thumb_size(mmr):
+    """(w, h) of a 480-wide thumbnail with the video's own proportions (turned videos included), or None."""
+    try:
+        w = int(mmr.extractMetadata(18))
+        h = int(mmr.extractMetadata(19))
+        rot = mmr.extractMetadata(24)
+        if rot is not None and int(rot) in (90, 270):
+            w, h = h, w
+        if w > 0 and h > 0:
+            tw = min(480, w)
+            return tw, max(1, int(h * tw / float(w)))
+    except Exception:
+        pass
+    return None
+
+
+def _frame(mmr, us, size):
+    """A frame already scaled to thumbnail size (Android 8.1+): much less memory and time than a
+    full-size picture that is scaled afterwards."""
+    if size and sdk_int() >= 27:
+        try:
+            return mmr.getScaledFrameAtTime(us, 2, size[0], size[1])
+        except Exception:
+            pass
+    return mmr.getFrameAtTime(us, 2)
+
+
 def _make_thumb_android(video, out):
     """Try several ways to get a frame; returns True when a JPEG was written.  A black frame (the
     first seconds of many episodes) is never accepted while a brighter one can be found."""
@@ -589,13 +616,14 @@ def _make_thumb_android(video, out):
     mmr = MMR()
     try:
         mmr.setDataSource(path)
+        size = _thumb_size(mmr)
         if duration:
             times = [min(max(duration * f, 1.0), duration * 0.95) for f in (0.1, 0.25, 0.4, 0.55)]
         else:
             times = [1.0, 5.0, 15.0, 40.0]
         for t in times:
             try:
-                if consider(mmr.getFrameAtTime(int(t * 1000000), 2)):
+                if consider(_frame(mmr, int(t * 1000000), size)):
                     return True
             except Exception as e:
                 errors.append('frame %.0f: %s' % (t, e))
@@ -620,6 +648,17 @@ def _make_thumb_android(video, out):
             pass
     LAST_THUMB_ERROR[0] = '; '.join(errors)[:300]
     return False
+
+
+def _thread_priority(p):
+    """Android nice value of the CALLING thread (0 = normal, 9 = a lot less CPU than the screen, 19 =
+    background).  Making thumbnails is heavy video decoding; it must never steal the CPU from drawing."""
+    if not ANDROID:
+        return
+    try:
+        autoclass('android.os.Process').setThreadPriority(int(p))
+    except Exception:
+        pass
 
 
 class ThumbService(object):
@@ -713,10 +752,15 @@ class ThumbService(object):
             return None, False
 
     def _work(self):
+        prio = None
         while True:
             item, is_bg = self._next()
             if item is None:
                 return
+            want = 19 if is_bg else 9
+            if want != prio:
+                prio = want
+                _thread_priority(want)
             video, out = item
             key = video['path']
             ok = os.path.exists(out)
