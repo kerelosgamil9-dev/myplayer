@@ -1021,9 +1021,27 @@ class PlayerPage(Page):
         self.end_panel.pos = (cx - w / 2.0, cy - h / 2.0)
 
     # ------------------------------------------------------------------ gestures
+    def _other_finger_holding(self, touch):
+        """True while a finger is held down for the 2x: every other finger is ignored until it is lifted."""
+        g = self.g
+        if not g or g.get('mode') != 'hold' or g['uid'] == touch.uid:
+            return False
+        try:
+            from kivy.base import EventLoop
+            alive = g['uid'] in [t.uid for t in EventLoop.touches]
+        except Exception:
+            alive = True
+        if not alive:                               # its touch-up got lost: do not block the screen forever
+            self.g = None
+            self._release_hold()
+            return False
+        return True
+
     def on_touch_down(self, touch):
         if not self.collide_point(*touch.pos):
             return False
+        if self._other_finger_holding(touch):
+            return True
         if self.end_panel.parent is self and self.end_panel.on_touch_down(touch):
             return True
         if self.locked:
@@ -1091,6 +1109,8 @@ class PlayerPage(Page):
 
     def on_touch_move(self, touch):
         g = self.g
+        if g and g.get('mode') == 'hold' and g['uid'] != touch.uid and touch.grab_current is not self:
+            return True
         if touch.grab_current is self and g and g['uid'] == touch.uid:
             dx, dy = touch.x - g['sx'], touch.y - g['sy']
             if g['mode'] is None and g.get('edge'):
@@ -1137,6 +1157,8 @@ class PlayerPage(Page):
 
     def on_touch_up(self, touch):
         g = self.g
+        if g and g.get('mode') == 'hold' and g['uid'] != touch.uid and touch.grab_current is not self:
+            return True
         if g and g['uid'] == touch.uid and touch.grab_current is not self:
             self._last_up = time.time()
         if touch.grab_current is self and g and g['uid'] == touch.uid:
