@@ -297,7 +297,7 @@ def pretty_title(name):
     return ' '.join(str(name).replace('_', ' ').split()) or str(name)
 
 
-BUILD = 'r30'                # shown at the bottom of the settings: tells which upload is installed
+BUILD = 'r31'                # shown at the bottom of the settings: tells which upload is installed
 MIN_RESUME = 3.0          # seconds: less than this watched = starts from zero, no progress bar
 
 
@@ -945,10 +945,14 @@ class Library(object):
 
     def rename_collection(self, cid, name):
         name = (name or '').strip()
-        if not name:
+        if not name and cid.startswith('p:'):
             return
         if cid.startswith('p:'):
             self.store.data['playlists'][cid[2:]]['name'] = name
+        elif not name:                                      # empty = go back to the folder's own name
+            st = self._auto_state(cid[2:])
+            st.pop('name', None)
+            st.pop('name_src', None)
         else:
             st = self._auto_state(cid[2:])
             b = self.buckets.get(cid[2:])

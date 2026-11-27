@@ -905,7 +905,9 @@ class FieldInput(FloatLayout):
                          align_mode='auto', nlines=4, size_hint=(None, None))
         self.add_widget(self.shown)
         self.add_widget(self.ti)
-        self.ti.bind(text=self._on_text, on_text_validate=self._validate, focus=self._on_focus)
+        self.ti.bind(text=self._on_text, on_text_validate=self._validate, focus=self._on_focus,
+                     cursor=self._on_cursor)
+        self._set_index(len(text or ''))                # typing starts at the end, like any text field
         self.bind(pos=self._layout, size=self._layout)
         self._blink = Clock.schedule_interval(self._blink_tick, 0.5)
         self._layout()
@@ -927,6 +929,86 @@ class FieldInput(FloatLayout):
 
     def _on_focus(self, inst, val):
         self._draw_caret()
+
+    # ---- caret position (our own drawing, so we also map touches to text positions) ----------------
+    def _index(self):
+        try:
+            return int(self.ti.cursor_index())
+        except Exception:
+            return len(self.ti.text)
+
+    def _set_index(self, idx):
+        idx = max(0, min(len(self.ti.text), int(idx)))
+        try:
+            self.ti.cursor = self.ti.get_cursor_from_index(idx)
+        except Exception:
+            pass
+
+    def _on_cursor(self, *a):
+        self._caret_on = True                          # a moved caret is shown at once
+        self._draw_caret()
+
+    def _lines(self):
+        return self.shown.logical_lines() if self.ti.text else ['']
+
+    @staticmethod
+    def _locate(idx, lines):
+        """(line number, offset in that line) of a text index; lines are separated by one space."""
+        base = 0
+        for n, line in enumerate(lines):
+            if idx <= base + len(line) or n == len(lines) - 1:
+                return n, max(0, min(len(line), idx - base))
+            base += len(line) + 1
+        return 0, 0
+
+    def _line_x(self, line, off, rtl):
+        """x of the caret after `off` characters of a (logical) line."""
+        pre = line[:off]
+        w = measure(textfix.fix(pre, 1 if rtl else 0), font_for(line), self.shown.font_size, False) if pre else 0
+        pad = dp(16)
+        if rtl:
+            return (self.x + self.width) - pad - w - dp(2)
+        return self.x + pad + w + dp(1)
+
+    def _line_cy(self, n, count):
+        return self.y + self.height / 2.0 + ((count - 1) / 2.0 - n) * self.LINE_H
+
+    def index_at(self, x, y):
+        """Text index nearest to a touch position."""
+        txt = self.ti.text
+        if not txt:
+            return 0
+        lines = self._lines()
+        rtl = textfix.is_rtl(txt)
+        k = min(range(len(lines)), key=lambda n: abs(self._line_cy(n, len(lines)) - y))
+        base = sum(len(l_) + 1 for l_ in lines[:k])
+        line = lines[k]
+        best, best_d = 0, None
+        for off in range(len(line) + 1):
+            d = abs(self._line_x(line, off, rtl) - x)
+            if best_d is None or d < best_d:
+                best, best_d = off, d
+        return min(len(txt), base + best)
+
+    def on_touch_down(self, touch):
+        if not self.collide_point(*touch.pos):
+            return super(FieldInput, self).on_touch_down(touch)
+        touch.grab(self)
+        self.ti.focus = True
+        self._set_index(self.index_at(touch.x, touch.y))
+        return True
+
+    def on_touch_move(self, touch):
+        if touch.grab_current is self:
+            self._set_index(self.index_at(touch.x, touch.y))
+            return True
+        return super(FieldInput, self).on_touch_move(touch)
+
+    def on_touch_up(self, touch):
+        if touch.grab_current is self:
+            touch.ungrab(self)
+            return True
+        return super(FieldInput, self).on_touch_up(touch)
 
     def _validate(self, *a):
         if self.on_submit:
@@ -980,17 +1062,11 @@ class FieldInput(FloatLayout):
         if not self._caret_on:
             return
         txt = self.ti.text
-        pad = dp(16)
-        lines = self.shown.logical_lines() if txt else ['']
-        last = lines[-1] if lines else ''
-        w = measure(textfix.fix(last), font_for(last), self.shown.font_size, False) if last else 0
+        lines = self._lines()
         rtl = textfix.is_rtl(txt) if txt else True
-        if rtl:
-            x = (self.x + self.width) - pad - w - dp(2)
-        else:
-            x = self.x + pad + w + dp(1)
-        # the text block is centred vertically; the caret sits on its last line
-        cy = self.y + self.height / 2.0 - (len(lines) - 1) * self.LINE_H / 2.0
+        n, off = self._locate(self._index(), lines)
+        x = self._line_x(lines[n], off, rtl)
+        cy = self._line_cy(n, len(lines))
         with self.canvas.after:
             Color(*ACCENT)
             Rectangle(pos=(x, cy - dp(11)), size=(dp(2), dp(22)))
@@ -2262,8 +2338,9 @@ class Dialog(Overlay):
 class PromptDialog(Dialog):
     auto_dismiss = False
 
-    def __init__(self, root, title, text='', hint='', ok_label='حفظ', on_ok=None, message='', **kw):
+    def __init__(self, root, title, text='', hint='', ok_label='حفظ', on_ok=None, message='', allow_empty=False, **kw):
         self._on_ok = on_ok
+        self._allow_empty = allow_empty
         super(PromptDialog, self).__init__(
             root, title, message,
             buttons=[(ok_label, self._submit_btn, 'primary'), ('إلغاء', None, 'plain')], **kw)
@@ -2281,7 +2358,7 @@ class PromptDialog(Dialog):
 
     def _submit_text(self, text):
         text = (text or '').strip()
-        if not text:
+        if not text and not self._allow_empty:
             return
         self.field.release()
         if self in self.root.overlays:

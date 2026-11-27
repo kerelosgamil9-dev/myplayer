@@ -619,8 +619,9 @@ def confirm(app, title, message, ok_label, on_ok, danger=True):
            [(ok_label, on_ok, 'danger' if danger else 'primary'), ('إلغاء', None, 'plain')]).show()
 
 
-def ask_text(app, title, text, hint, on_ok, ok_label='حفظ'):
-    PromptDialog(app.root, title, text=text, hint=hint, ok_label=ok_label, on_ok=on_ok).show()
+def ask_text(app, title, text, hint, on_ok, ok_label='حفظ', allow_empty=False):
+    PromptDialog(app.root, title, text=text, hint=hint, ok_label=ok_label, on_ok=on_ok,
+                 allow_empty=allow_empty).show()
 
 
 def choose_playlist(app, keys, after=None):
@@ -1680,7 +1681,9 @@ class HomePage(Page, ListPageMixin):
             def ok(name):
                 lib.rename_collection(sid, name)
                 after()
-            ask_text(self.app, 'تعديل اسم القائمة', c.name, 'اسم القائمة', ok)
+            dev = sid.startswith('a:')
+            ask_text(self.app, 'تعديل اسم القائمة', c.name,
+                     'اتركه فاضي لاسم المجلد الأصلي' if dev else 'اسم القائمة', ok, allow_empty=dev)
         else:
             rename_video_dialog(self.app, sid, after)
 
@@ -1849,8 +1852,11 @@ class CollectionPage(Page, ListPageMixin):
             self.refresh()
             app.root.refresh_pages()
             if self.cid.startswith('a:'):
-                app.root.say('تم تغيير الاسم داخل البرنامج فقط، واسم الألبوم في الاستوديو كما هو')
-        ask_text(app, 'تعديل اسم القائمة', c.name, 'اسم القائمة', ok)
+                app.root.say('رجع اسم المجلد الأصلي' if not name else
+                             'تم تغيير الاسم داخل البرنامج فقط، واسم الألبوم في الاستوديو كما هو')
+        dev = self.cid.startswith('a:')
+        ask_text(app, 'تعديل اسم القائمة', c.name, 'اتركه فاضي لاسم المجلد الأصلي' if dev else 'اسم القائمة',
+                 ok, allow_empty=dev)
 
     def on_selection_changed(self):
         self.vlist.reorderable = bool(self.ctx.sel_mode and not self.query)
