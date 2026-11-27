@@ -2043,9 +2043,11 @@ class GroupPage(Page, ListPageMixin):
             return
         if self.ctx.sel_mode:
             n = len(self.ctx.selected)
-            left = [IconButton('select_all', callback=lambda w: self.select_all()),
-                    IconButton('share', callback=lambda w: self.act_share()),
-                    IconButton('trash', color=DANGER, callback=lambda w: self.act_remove())]
+            left = [IconButton('select_all', callback=lambda w: self.select_all())]
+            if n == 1:
+                left.append(IconButton('edit', callback=lambda w: self.act_rename()))
+            left += [IconButton('share', callback=lambda w: self.act_share()),
+                     IconButton('trash', color=DANGER, callback=lambda w: self.act_remove())]
             self.header.set('%d محدد' % n, '', [self.btn_close], left, short=str(n))
             return
         sub = core.count_lists_label(len(g.lists)) + '  •  ' + core.count_videos_label(g.count)
@@ -2083,6 +2085,27 @@ class GroupPage(Page, ListPageMixin):
             self.refresh()
             app.root.refresh_pages()
         pick_lists(app, 'إضافة قوائم إلى المجلد', cands, 'إضافة', done)
+
+    def act_rename(self):
+        """Rename the one selected list (a device list can go back to its folder name with an empty name)."""
+        app = self.app
+        ids = list(self.ctx.selected)
+        if len(ids) != 1:
+            return
+        cid = ids[0]
+        c = app.lib.collection(cid)
+        if c is None:
+            return
+        dev = cid.startswith('a:')
+
+        def ok(name):
+            app.lib.rename_collection(cid, name)
+            app.store.save()
+            self.exit_selection()
+            self.refresh()
+            app.root.refresh_pages()
+        ask_text(app, 'تعديل اسم القائمة', c.name, 'اتركه فاضي لاسم المجلد الأصلي' if dev else 'اسم القائمة',
+                 ok, allow_empty=dev)
 
     def act_share(self):
         lib = self.app.lib

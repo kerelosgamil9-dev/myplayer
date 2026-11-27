@@ -26,6 +26,10 @@ from kivy.uix.label import Label
 from kivy.uix.stencilview import StencilView
 from kivy.uix.textinput import TextInput
 from kivy.uix.widget import Widget
+try:
+    from kivy.uix.behaviors import FocusBehavior
+except ImportError:                                   # the stand-in Kivy used by the tests
+    FocusBehavior = None
 
 import core
 import textfix
@@ -994,6 +998,10 @@ class FieldInput(FloatLayout):
         if not self.collide_point(*touch.pos):
             return super(FieldInput, self).on_touch_down(touch)
         touch.grab(self)
+        # the touch never reaches the TextInput, so tell Kivy it was ours: otherwise it counts as a touch
+        # "outside" and closes the keyboard when the finger lifts
+        if FocusBehavior is not None:
+            FocusBehavior.ignored_touch.append(touch)
         self.ti.focus = True
         self._set_index(self.index_at(touch.x, touch.y))
         return True
