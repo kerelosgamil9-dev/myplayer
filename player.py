@@ -391,6 +391,7 @@ class PlayerPage(Page):
         self._closed = False
         self._oriented = False
         self._last_save = 0
+        self._guard = None                   # (resume point, time opened): see save_progress
         self._brightness = None
         self._ended = False
         self._last_up = 0.0
@@ -554,6 +555,9 @@ class PlayerPage(Page):
         if start is None:
             start = self.lib.resume_pos(key) if self.store.setting('resume') else 0.0
         self.lib.mark_started(key)
+        # Until the engine has really reached the resume point its clock may still say 0: a save in that
+        # window (screen locked, app switched, back pressed) would wipe the saved position.
+        self._guard = (float(start), time.time()) if start and start >= core.MIN_RESUME else None
         bridge.crumb('player: load %s' % v['path'])
         self.engine.open(v['path'], start=start, speed=self.speed, paused=False,
                          duration_hint=v.get('duration', 0))
@@ -567,7 +571,7 @@ class PlayerPage(Page):
         if n <= 1:
             if auto:
                 return False
-            self.engine.seek(0)
+            self._seek(0)
             return True
         if self.cursor + 1 < n:
             self.cursor += 1
@@ -582,7 +586,7 @@ class PlayerPage(Page):
         """Always the previous video, however far into this one we are (it carries on where it was left).
         Only on the first video does it restart the current one."""
         if self.cursor == 0:
-            self.engine.seek(0)
+            self._seek(0)
             return
         self.cursor -= 1
         self._start_current()
@@ -620,6 +624,7 @@ class PlayerPage(Page):
         if self._closed:
             return
         self._ended = True
+        self._guard = None
         if self.key:
             self.lib.set_progress(self.key, 0, self.engine.duration)
         if self.repeat == 'one':
@@ -720,7 +725,7 @@ class PlayerPage(Page):
         pos = self.engine.position
         dur = self.engine.duration or 1e9
         target = max(0.0, min(dur - 0.5, pos + delta))
-        self.engine.seek(target)
+        self._seek(target)
         self._clear_ended()
         if show:
             if side in self.step_fb:
@@ -818,7 +823,7 @@ class PlayerPage(Page):
         self.bubble.hide()
         d = self.engine.duration
         if d:
-            self.engine.seek(v * d, accurate=True)
+            self._seek(v * d, accurate=True)
             self._clear_ended()
         self.show_controls(True)
 
@@ -909,6 +914,14 @@ class PlayerPage(Page):
             'frames skipped %d   held %d   pacing %s (%.2f)' % (
                 st.get('skipped', 0), st.get('held', 0), 'on' if st.get('paced') else 'off', st.get('lock', 0))])
 
+    def _seek(self, t, accurate=False):
+        """Every seek the person asks for goes through here (it ends the 'still loading' protection)."""
+        self._guard = None
+        if accurate:
+            self.engine.seek(t, accurate=True)
+        else:
+            self.engine.seek(t)
+
     def save_progress(self, force=False):
         if not self.key:
             return
@@ -918,6 +931,12 @@ class PlayerPage(Page):
         pos = e.position
         if self._ended:
             pos = 0
+        elif self._guard is not None:
+            start, t0 = self._guard
+            if pos >= start - 1.5 or time.time() - t0 > 12:
+                self._guard = None                   # arrived (or it never will): the clock is trustworthy now
+            else:
+                return                               # still loading: keep what was saved
         self.lib.set_progress(self.key, pos, e.duration)
         self._last_save = time.time()
         if force:
@@ -1176,7 +1195,7 @@ class PlayerPage(Page):
                     self.engine.set_speed(self.speed)
             elif mode == 'seek':
                 if 'target' in g:
-                    self.engine.seek(g['target'])
+                    self._seek(g['target'])
                     self._clear_ended()
                 self.seek_card.hide()
             elif mode in ('bright', 'vol'):

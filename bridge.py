@@ -452,6 +452,8 @@ def _scan_android():
                 continue
             if '/.' in path:                 # hidden folders / trash
                 continue
+            if not os.path.exists(path):     # MediaStore still lists the old path after a rename / delete
+                continue
             out.append({
                 'id': n('_id'),
                 'path': path,

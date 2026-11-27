@@ -297,7 +297,7 @@ def pretty_title(name):
     return ' '.join(str(name).replace('_', ' ').split()) or str(name)
 
 
-BUILD = 'r29'                # shown at the bottom of the settings: tells which upload is installed
+BUILD = 'r30'                # shown at the bottom of the settings: tells which upload is installed
 MIN_RESUME = 3.0          # seconds: less than this watched = starts from zero, no progress bar
 
 
@@ -480,10 +480,108 @@ class Library(object):
             bid = str(v.get('bucket_id') or os.path.dirname(key))
             b = self.buckets.get(bid)
             if b is None:
-                b = {'id': bid, 'name': pretty_title(v.get('bucket') or os.path.basename(os.path.dirname(key)) or '?'),
+                folder = os.path.basename(os.path.dirname(key))      # the real folder name: never older than the file path
+                b = {'id': bid, 'name': pretty_title(folder or v.get('bucket') or '?'),
                      'path': os.path.dirname(key), 'keys': []}
                 self.buckets[bid] = b
             b['keys'].append(key)
+        try:
+            self._follow_moves()
+        except Exception:                      # never let a clever step break the scan
+            import traceback
+            traceback.print_exc()
+
+    # ---- folders renamed / files moved outside the app --------------------------------
+    def _known_keys(self):
+        d = self.store.data
+        ks = set(d['progress']) | set(d['titles'])
+        for p in list(d['playlists'].values()) + list(d['deleted_playlists'].values()):
+            ks.update(p.get('items', []))
+            ks.update(p.get('order', []))
+        for st in d['auto'].values():
+            for f in ('order', 'extra', 'hidden'):
+                ks.update(st.get(f, []))
+        return ks
+
+    def _follow_moves(self):
+        """When a folder is renamed in the gallery (or files are moved) the paths change, and everything the
+        app remembered under the old paths (progress, titles, playlists, order) would be lost.  Match every
+        remembered path that no longer exists with a new file of the same name and carry the data over."""
+        known = self._known_keys()
+        missing = [k for k in known if k not in self.videos]
+        if not missing or not self.videos:
+            return
+        by_name = {}
+        for k in self.videos:
+            if k not in known:
+                by_name.setdefault(os.path.basename(k).casefold(), []).append(k)
+        d = self.store.data
+        moved = {}
+        taken = set()
+        for old in missing:
+            cands = by_name.get(os.path.basename(old).casefold(), [])
+            cands = [c for c in cands if c not in taken]
+            if not cands:
+                continue
+            same_parent = [c for c in cands
+                           if os.path.dirname(os.path.dirname(c)) == os.path.dirname(os.path.dirname(old))]
+            dur = (d['progress'].get(old) or {}).get('dur', 0)
+            if len(same_parent) == 1:
+                new = same_parent[0]
+            elif len(cands) == 1 and dur and abs((self.videos[cands[0]].get('duration') or 0) - dur) < 1.5:
+                new = cands[0]
+            else:
+                continue
+            moved[old] = new
+            taken.add(new)
+        if not moved:
+            return
+
+        def fix(lst):
+            return [moved.get(k, k) for k in lst]
+        for sect in ('progress', 'titles'):
+            for old, new in moved.items():
+                if old in d[sect] and new not in d[sect]:
+                    d[sect][new] = d[sect].pop(old)
+        for p in list(d['playlists'].values()) + list(d['deleted_playlists'].values()):
+            for f in ('items', 'order'):
+                if f in p:
+                    p[f] = fix(p[f])
+        for st in d['auto'].values():
+            for f in ('order', 'extra', 'hidden'):
+                if f in st:
+                    st[f] = fix(st[f])
+        # the device list itself: its id (bucket id) changes with the folder name
+        # which old bucket did the moved files come from?  the bucket state that mentions them
+        for ob, st in list(d['auto'].items()):
+            if ob in self.buckets:
+                continue                                   # that list still exists
+            mentioned = set()
+            for f in ('order', 'extra', 'hidden'):
+                mentioned.update(st.get(f, []))
+            tally = {}
+            for k in mentioned:
+                if k in self.videos:
+                    nb = str(self.videos[k].get('bucket_id') or os.path.dirname(k))
+                    tally[nb] = tally.get(nb, 0) + 1
+            if not tally:
+                continue
+            nb = max(tally, key=lambda x: tally[x])
+            if nb in self.buckets and not any(d['auto'].get(nb, {}).get(f) for f in ('order', 'extra', 'hidden', 'sort')):
+                st = dict(st)
+                st.pop('name', None)                       # the gallery's new name wins
+                st.pop('name_src', None)
+                d['auto'][nb] = st
+                d['auto'].pop(ob, None)
+                self._rename_cid('a:' + ob, 'a:' + nb)
+        self.store.mark()
+
+    def _rename_cid(self, old, new):
+        d = self.store.data
+        d['hidden_colls'] = [new if c == old else c for c in d['hidden_colls']]
+        d['coll_order'] = [new if c == old else c for c in d['coll_order']]
+        for g in d['groups'].values():
+            g['lists'] = [new if c == old else c for c in g.get('lists', [])]
 
     def exists(self, key):
         return key in self.videos
@@ -583,6 +681,25 @@ class Library(object):
     def _auto_state(self, bid):
         return self.store.data['auto'].setdefault(bid, {})
 
+    def _auto_name(self, bid, b):
+        """Name shown for a device list: the name the user typed in the app, but only for as long as the
+        gallery's own name is still the one it was when he typed it (a rename in the gallery wins)."""
+        st = self.store.data['auto'].get(bid) or {}
+        mine = st.get('name')
+        if not mine:
+            return b['name']
+        src = st.get('name_src')
+        if src is None:
+            st['name_src'] = b['name']                      # an older rename: remember what it replaced
+            self.store.mark()
+            return mine
+        if src != b['name']:
+            st.pop('name', None)
+            st.pop('name_src', None)
+            self.store.mark()
+            return b['name']
+        return mine
+
     def collection_sort(self, cid):
         st = self._state(cid)
         s = st.get('sort') or {}
@@ -651,7 +768,7 @@ class Library(object):
             keys = self._ordered_keys(cid)
             if not keys:
                 continue
-            name = self._auto_state(bid).get('name') or b['name']
+            name = self._auto_name(bid, b)
             res.append(Collection(cid, name, 'auto', keys, b['path']))
         for pid, p in self.store.data['playlists'].items():
             cid = 'p:' + pid
@@ -833,7 +950,14 @@ class Library(object):
         if cid.startswith('p:'):
             self.store.data['playlists'][cid[2:]]['name'] = name
         else:
-            self._auto_state(cid[2:])['name'] = name
+            st = self._auto_state(cid[2:])
+            b = self.buckets.get(cid[2:])
+            if b is not None and name == b['name']:
+                st.pop('name', None)                        # same as the gallery's name: nothing to override
+                st.pop('name_src', None)
+            else:
+                st['name'] = name
+                st['name_src'] = b['name'] if b is not None else None
         self.store.mark()
 
     def delete_collection(self, cid):
@@ -854,7 +978,7 @@ class Library(object):
             b = self.buckets.get(cid[2:])
             if b is None:
                 continue
-            name = self._auto_state(cid[2:]).get('name') or b['name']
+            name = self._auto_name(cid[2:], b)
             out.append((cid, name, len([k for k in b['keys'] if k in self.videos])))
         for pid, p in self.store.data['deleted_playlists'].items():
             out.append(('p:' + pid, p.get('name', '?'), len([k for k in p.get('items', []) if k in self.videos])))

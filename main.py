@@ -235,6 +235,7 @@ class ProPlayerApp(App):
             p.on_app_resume()
         else:
             self.rescan()
+            Clock.schedule_once(lambda dt: self.rescan(), 2.5)     # a gallery rename reaches MediaStore a moment later
 
     def on_stop(self):
         try:

@@ -1763,6 +1763,7 @@ class CollectionPage(Page, ListPageMixin):
         self.btn_sort = IconButton('sort', callback=lambda w: self.open_sort())
         self.btn_search = IconButton('search', callback=lambda w: self.toggle_search(True))
         self.btn_add = IconButton('plus', callback=lambda w: self.add_videos())
+        self.btn_edit = IconButton('edit', callback=lambda w: self.rename_list())
         self.bind(pos=self._lay, size=self._lay)
         self._lay()
 
@@ -1832,8 +1833,24 @@ class CollectionPage(Page, ListPageMixin):
         total = self.app.lib.total_duration(c.keys)
         if total:
             sub += '  •  ' + core.fmt_time(total)
-        left = [self.btn_add, self.btn_search, self.btn_sort]
+        left = [self.btn_edit, self.btn_add, self.btn_search, self.btn_sort]
         self.header.set(c.name, sub, [self.btn_back], left)
+
+    def rename_list(self):
+        """Change the list's name from inside the app (a device list keeps its folder name in the gallery)."""
+        c = self.coll
+        if c is None:
+            return
+        app = self.app
+
+        def ok(name):
+            app.lib.rename_collection(self.cid, name)
+            app.store.save()
+            self.refresh()
+            app.root.refresh_pages()
+            if self.cid.startswith('a:'):
+                app.root.say('تم تغيير الاسم داخل البرنامج فقط، واسم الألبوم في الاستوديو كما هو')
+        ask_text(app, 'تعديل اسم القائمة', c.name, 'اسم القائمة', ok)
 
     def on_selection_changed(self):
         self.vlist.reorderable = bool(self.ctx.sel_mode and not self.query)
